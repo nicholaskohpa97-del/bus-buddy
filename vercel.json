@@ -1,5 +1,6 @@
 {
-  "buildCommand": false,
+  "framework": null,
+  "buildCommand": "",
   "outputDirectory": "public",
   "functions": {
     "api/*.js": {
