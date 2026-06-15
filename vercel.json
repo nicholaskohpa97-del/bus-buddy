@@ -5,6 +5,5 @@
     "api/*.js": {
       "runtime": "@vercel/node@3"
     }
-  },
-  "excludeFiles": ["server.js"]
+  }
 }
