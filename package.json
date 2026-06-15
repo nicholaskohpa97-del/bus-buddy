@@ -1,0 +1,12 @@
+{
+  "name": "bus-buddy",
+  "version": "1.0.0",
+  "description": "Singapore bus timing checker with reminders",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  }
+}

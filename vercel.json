@@ -1,0 +1,9 @@
+{
+  "rewrites": [
+    { "source": "/api/set-key", "destination": "/api/set-key" },
+    { "source": "/api/bus-arrival", "destination": "/api/bus-arrival" },
+    { "source": "/api/bus-stops", "destination": "/api/bus-stops" },
+    { "source": "/api/bus-routes", "destination": "/api/bus-routes" }
+  ],
+  "outputDirectory": "public"
+}
