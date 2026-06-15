@@ -1,4 +1,4 @@
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   const key = process.env.LTA_API_KEY;
   if (!key) return res.status(400).json({ error: "LTA_API_KEY not configured" });
 
