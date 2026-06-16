@@ -120,6 +120,7 @@ async function handleSearch(val) {
 function selectStop(code) {
   document.getElementById("stopSearch").value = code;
   document.getElementById("searchResults").classList.add("hidden");
+  document.getElementById("nearbyResults").classList.add("hidden");
   searchStop();
 }
 
@@ -554,6 +555,62 @@ function haversine(lat1, lon1, lat2, lon2) {
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ── Nearby Stops ──
+async function findNearbyStops() {
+  const container = document.getElementById("nearbyResults");
+  container.classList.remove("hidden");
+  container.innerHTML = '<div class="nearby-locating">Locating you...</div>';
+
+  if (!navigator.geolocation) {
+    container.innerHTML = '<div class="nearby-locating">Geolocation not supported in this browser.</div>';
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      const { latitude, longitude } = pos.coords;
+      try {
+        const stops = await loadBusStops();
+        const withDist = stops.map((s) => ({
+          ...s,
+          dist: haversine(latitude, longitude, s.Latitude, s.Longitude),
+        }));
+        withDist.sort((a, b) => a.dist - b.dist);
+        const nearest = withDist.slice(0, 10);
+
+        container.innerHTML = `
+          <div class="nearby-header">
+            <h3>Nearest Bus Stops</h3>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('nearbyResults').classList.add('hidden')">Close</button>
+          </div>
+          ${nearest
+            .map(
+              (s) => `
+            <div class="nearby-card" onclick="selectStop('${s.BusStopCode}')">
+              <div class="nearby-info">
+                <div class="nearby-name">${s.Description}</div>
+                <div class="nearby-detail">${s.BusStopCode} &middot; ${s.RoadName}</div>
+              </div>
+              <div class="nearby-dist">${formatDist(s.dist)}</div>
+            </div>`
+            )
+            .join("")}`;
+      } catch {
+        container.innerHTML = '<div class="nearby-locating">Failed to load bus stops.</div>';
+      }
+    },
+    (err) => {
+      container.innerHTML = `<div class="nearby-locating">Location error: ${err.message}</div>`;
+    },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+
+function formatDist(m) {
+  if (m < 1000) return `${Math.round(m)}m`;
+  return `${(m / 1000).toFixed(1)}km`;
 }
 
 // ── Settings ──
