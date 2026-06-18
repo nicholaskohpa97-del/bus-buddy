@@ -8,6 +8,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/icon-192.svg">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
   <title>Bus Buddy - Singapore</title>
   <style>
     :root {
@@ -429,6 +432,74 @@
       color: var(--accent);
       text-decoration: underline;
     }
+
+    @media (max-width: 380px) {
+      .tab { font-size: 11px; }
+    }
+
+    /* ── Dashboard ── */
+    .dash-section { margin-bottom: 20px; }
+    .dash-section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .dash-section-header h3 { font-size: 15px; font-weight: 700; }
+    .dash-stop-card { margin-bottom: 10px; }
+    .dash-stop-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .dash-stop-name { font-weight: 600; font-size: 14px; margin-right: 8px; }
+    .dash-loading, .dash-tap-load, .dash-no-service, .dash-error {
+      font-size: 12px; color: var(--text2); padding: 8px 0;
+    }
+    .dash-error { color: var(--red); }
+    .dash-more-link {
+      padding: 8px 0 0; font-size: 12px; color: var(--accent); cursor: pointer;
+    }
+    .dash-more-link:hover { text-decoration: underline; }
+    .dash-reminder-card { margin-bottom: 8px; padding: 12px 16px; }
+    .dash-reminder-card.dash-disabled { opacity: 0.5; }
+    .dash-reminder-top {
+      display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;
+    }
+    .dash-next-trigger { font-size: 11px; color: var(--yellow); margin-top: 4px; }
+    .dash-dropoff-card {
+      margin-bottom: 8px; padding: 12px 16px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .dash-dropoff-active { background: rgba(251,146,60,0.1); border-color: var(--orange); }
+
+    /* ── Map ── */
+    .map-wrap { position: relative; }
+    #busMap {
+      width: 100%;
+      height: calc(100vh - 140px);
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+    .map-locate-btn {
+      position: absolute; top: 80px; left: 10px; z-index: 90;
+      background: var(--surface); border: 1px solid var(--border);
+      color: var(--text); width: 36px; height: 36px; border-radius: 6px;
+      cursor: pointer; font-size: 18px; display: flex; align-items: center;
+      justify-content: center;
+    }
+    .map-locate-btn:hover { background: var(--surface2); }
+    .leaflet-popup-content-wrapper {
+      background: var(--surface) !important; color: var(--text) !important;
+      border: 1px solid var(--border) !important; border-radius: 8px !important;
+    }
+    .leaflet-popup-tip { background: var(--surface) !important; }
+    .leaflet-popup-content { margin: 10px 14px !important; font-size: 13px; }
+    .leaflet-popup-content .popup-name { font-weight: 600; font-size: 14px; }
+    .leaflet-popup-content .popup-detail { color: var(--text2); font-size: 12px; margin: 4px 0 8px; }
+    .leaflet-popup-content .popup-actions { display: flex; gap: 6px; }
+    .leaflet-popup-close-button { color: var(--text2) !important; }
   </style>
 </head>
 <body>
@@ -446,13 +517,52 @@
     </div>
 
     <div class="tabs">
-      <button class="tab active" data-tab="arrivals" onclick="switchTab('arrivals')">Arrivals</button>
+      <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Home</button>
+      <button class="tab" data-tab="arrivals" onclick="switchTab('arrivals')">Arrivals</button>
+      <button class="tab" data-tab="map" onclick="switchTab('map')">Map</button>
       <button class="tab" data-tab="favourites" onclick="switchTab('favourites')">Favourites</button>
       <button class="tab" data-tab="reminders" onclick="switchTab('reminders')">Reminders</button>
     </div>
 
+    <!-- HOME / DASHBOARD TAB -->
+    <div id="tab-dashboard">
+      <div class="dash-section">
+        <div class="dash-section-header">
+          <h3>Your Stops</h3>
+          <button class="btn btn-ghost btn-sm" onclick="dashRefreshAll()">Refresh All</button>
+        </div>
+        <div id="dashFavStops"></div>
+        <div id="dashFavEmpty" class="empty-state hidden">
+          <div class="icon">&#9734;</div>
+          <p>No favourite stops yet.<br><a href="#" onclick="switchTab('arrivals');return false" style="color:var(--accent)">Search for a bus stop</a> and tap the star to save it.</p>
+        </div>
+      </div>
+      <div class="dash-section">
+        <div class="dash-section-header">
+          <h3>Departure Reminders</h3>
+          <button class="btn btn-ghost btn-sm" onclick="switchTab('reminders')">Manage</button>
+        </div>
+        <div id="dashDeptReminders"></div>
+        <div id="dashDeptEmpty" class="empty-state hidden">
+          <div class="icon">&#128276;</div>
+          <p>No departure reminders set.<br><a href="#" onclick="openDepartureReminderModal();return false" style="color:var(--accent)">Add one</a> to get notified before your bus arrives.</p>
+        </div>
+      </div>
+      <div class="dash-section">
+        <div class="dash-section-header">
+          <h3>Drop-off Alerts</h3>
+          <button class="btn btn-ghost btn-sm" onclick="switchTab('reminders')">Manage</button>
+        </div>
+        <div id="dashDropoffs"></div>
+        <div id="dashDropoffEmpty" class="empty-state hidden">
+          <div class="icon">&#128205;</div>
+          <p>No drop-off alerts set.<br><a href="#" onclick="openDropoffModal();return false" style="color:var(--accent)">Add one</a> to get alerted near your stop.</p>
+        </div>
+      </div>
+    </div>
+
     <!-- ARRIVALS TAB -->
-    <div id="tab-arrivals">
+    <div id="tab-arrivals" class="hidden">
       <div class="search-bar">
         <input type="text" id="stopSearch" placeholder="Search stop name or code (e.g. 83139)" oninput="handleSearch(this.value)">
         <button class="btn" onclick="searchStop()">Search</button>
@@ -471,6 +581,14 @@
         <button class="btn btn-sm btn-danger" onclick="stopDropoff()">Stop</button>
       </div>
       <div id="arrivalResults"></div>
+    </div>
+
+    <!-- MAP TAB -->
+    <div id="tab-map" class="hidden">
+      <div class="map-wrap">
+        <div id="busMap"></div>
+        <button class="map-locate-btn" onclick="locateOnMap()" title="Find my location">&#128205;</button>
+      </div>
     </div>
 
     <!-- FAVOURITES TAB -->
@@ -559,6 +677,8 @@
 
   <div id="toast" class="notification-toast hidden"></div>
 
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
   <script src="app.js"></script>
   <script>
     if ("serviceWorker" in navigator) {

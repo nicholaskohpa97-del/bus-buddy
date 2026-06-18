@@ -15,6 +15,20 @@ let deptCheckTimer = null;
 let dropoffWatchId = null;
 let activeDropoff = null;
 
+// Dashboard state
+let dashFetchQueue = [];
+let dashFetchTimer = null;
+let dashRefreshTimer = null;
+let dashArrivalCache = {};
+const DASH_CACHE_TTL = 20000;
+const DASH_MAX_SERVICES = 3;
+const DASH_FETCH_DELAY_MS = 800;
+
+// Map state
+let map = null;
+let mapMarkers = null;
+let mapUserMarker = null;
+
 // ── Init ──
 document.addEventListener("DOMContentLoaded", async () => {
   const keyCheck = await fetch("/api/check-key").then(r => r.json()).catch(() => ({ hasKey: false }));
@@ -30,6 +44,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderFavourites();
   renderDepartureReminders();
   renderDropoffAlerts();
+  refreshDashboard();
+  startDashAutoRefresh();
   requestNotificationPermission();
   startDepartureChecker();
 });
@@ -66,9 +82,19 @@ function switchTab(tab) {
   document.querySelectorAll(".tab").forEach((t) => {
     t.classList.toggle("active", t.dataset.tab === tab);
   });
-  ["arrivals", "favourites", "reminders"].forEach((t) => {
+  ["dashboard", "arrivals", "map", "favourites", "reminders"].forEach((t) => {
     document.getElementById(`tab-${t}`).classList.toggle("hidden", t !== tab);
   });
+  if (tab === "dashboard") {
+    refreshDashboard();
+    startDashAutoRefresh();
+  } else {
+    stopDashAutoRefresh();
+  }
+  if (tab === "map") {
+    if (!map) initMap();
+    else setTimeout(() => map.invalidateSize(), 100);
+  }
 }
 
 // ── Search ──
@@ -262,6 +288,7 @@ function toggleFav(code, name) {
   }
   localStorage.setItem("bb_favourites", JSON.stringify(state.favourites));
   renderFavourites();
+  refreshDashboard();
   if (state.currentStop === code) loadArrivals(code);
 }
 
@@ -322,6 +349,7 @@ function saveDepartureReminder() {
   );
   document.getElementById("deptReminderModal").classList.add("hidden");
   renderDepartureReminders();
+  refreshDashboard();
   showToast("Departure reminder saved");
 }
 
@@ -334,6 +362,7 @@ function deleteDeptReminder(id) {
     JSON.stringify(state.departureReminders)
   );
   renderDepartureReminders();
+  refreshDashboard();
 }
 
 function toggleDeptReminder(id) {
@@ -344,6 +373,7 @@ function toggleDeptReminder(id) {
     JSON.stringify(state.departureReminders)
   );
   renderDepartureReminders();
+  refreshDashboard();
 }
 
 function renderDepartureReminders() {
@@ -437,6 +467,7 @@ function saveDropoffAlert() {
   );
   document.getElementById("dropoffModal").classList.add("hidden");
   renderDropoffAlerts();
+  refreshDashboard();
   resolveDropoffCoords(alert);
   showToast("Drop-off alert saved");
 }
@@ -463,6 +494,7 @@ function deleteDropoffAlert(id) {
     JSON.stringify(state.dropoffAlerts)
   );
   renderDropoffAlerts();
+  refreshDashboard();
   if (activeDropoff && activeDropoff.id === id) stopDropoff();
 }
 
@@ -534,6 +566,7 @@ function startDropoff(alertId) {
   );
 
   renderDropoffAlerts();
+  refreshDashboard();
 }
 
 function stopDropoff() {
@@ -544,6 +577,7 @@ function stopDropoff() {
   activeDropoff = null;
   document.getElementById("dropoffBanner").classList.add("hidden");
   renderDropoffAlerts();
+  refreshDashboard();
 }
 
 function haversine(lat1, lon1, lat2, lon2) {
@@ -555,6 +589,259 @@ function haversine(lat1, lon1, lat2, lon2) {
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ── Dashboard ──
+function refreshDashboard() {
+  renderDashFavourites();
+  renderDashReminders();
+  renderDashDropoffs();
+}
+
+function renderDashFavourites() {
+  const container = document.getElementById("dashFavStops");
+  const empty = document.getElementById("dashFavEmpty");
+  if (!container) return;
+
+  if (state.favourites.length === 0) {
+    container.innerHTML = "";
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+
+  container.innerHTML = state.favourites.map((fav, i) => `
+    <div class="card dash-stop-card" id="dash-stop-${fav.code}" data-stop="${fav.code}">
+      <div class="dash-stop-header">
+        <div>
+          <span class="dash-stop-name">${fav.name}</span>
+          <span class="bus-stop-code">${fav.code}</span>
+        </div>
+        <button class="btn btn-ghost btn-sm" onclick="dashLoadStop('${fav.code}')">Load</button>
+      </div>
+      <div class="dash-stop-arrivals" id="dash-arrivals-${fav.code}">
+        ${i < 3 ? '<div class="dash-loading">Loading arrivals...</div>' : '<div class="dash-tap-load">Tap Load to see arrivals</div>'}
+      </div>
+    </div>
+  `).join("");
+
+  dashFetchQueue = state.favourites.slice(0, 3).map(f => f.code);
+  processDashFetchQueue();
+}
+
+function processDashFetchQueue() {
+  clearTimeout(dashFetchTimer);
+  if (dashFetchQueue.length === 0) return;
+  const code = dashFetchQueue.shift();
+  dashLoadStop(code);
+  if (dashFetchQueue.length > 0) {
+    dashFetchTimer = setTimeout(processDashFetchQueue, DASH_FETCH_DELAY_MS);
+  }
+}
+
+async function dashLoadStop(stopCode) {
+  const container = document.getElementById(`dash-arrivals-${stopCode}`);
+  if (!container) return;
+
+  const cached = dashArrivalCache[stopCode];
+  if (cached && (Date.now() - cached.timestamp) < DASH_CACHE_TTL) {
+    renderDashArrivals(stopCode, cached.data);
+    return;
+  }
+
+  container.innerHTML = '<div class="dash-loading">Loading...</div>';
+  try {
+    const data = await fetchArrivals(stopCode);
+    dashArrivalCache[stopCode] = { data, timestamp: Date.now() };
+    renderDashArrivals(stopCode, data);
+  } catch {
+    container.innerHTML = '<div class="dash-error">Failed to load</div>';
+  }
+}
+
+function renderDashArrivals(stopCode, data) {
+  const container = document.getElementById(`dash-arrivals-${stopCode}`);
+  if (!container) return;
+
+  const card = document.getElementById(`dash-stop-${stopCode}`);
+  const headerBtn = card.querySelector(".dash-stop-header .btn, .dash-stop-header .auto-refresh");
+  if (headerBtn && headerBtn.classList.contains("btn")) {
+    headerBtn.outerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;">
+        <div class="auto-refresh"><div class="dot"></div> Live</div>
+        <button class="icon-btn" onclick="event.stopPropagation();goToStop('${stopCode}')" title="Full view">&#8594;</button>
+      </div>`;
+  }
+
+  if (!data.Services || data.Services.length === 0) {
+    container.innerHTML = '<div class="dash-no-service">No services at this time</div>';
+    return;
+  }
+
+  const services = data.Services.map(svc => {
+    const times = [svc.NextBus, svc.NextBus2, svc.NextBus3].map(parseBusArrival);
+    return { no: svc.ServiceNo, times };
+  });
+  services.sort((a, b) => {
+    const aMin = Math.min(...a.times.map(t => t.min ?? 999));
+    const bMin = Math.min(...b.times.map(t => t.min ?? 999));
+    return aMin - bMin;
+  });
+
+  const shown = services.slice(0, DASH_MAX_SERVICES);
+  const remaining = services.length - DASH_MAX_SERVICES;
+
+  container.innerHTML = shown.map(svc => renderServiceRow(svc, stopCode)).join("")
+    + (remaining > 0
+      ? `<div class="dash-more-link" onclick="goToStop('${stopCode}')">+${remaining} more service${remaining > 1 ? 's' : ''} &rsaquo;</div>`
+      : "");
+}
+
+function startDashAutoRefresh() {
+  clearInterval(dashRefreshTimer);
+  dashRefreshTimer = setInterval(() => {
+    const loadedStops = Object.keys(dashArrivalCache);
+    if (loadedStops.length === 0) return;
+    dashFetchQueue = loadedStops.slice();
+    dashArrivalCache = {};
+    processDashFetchQueue();
+  }, state.refreshSec * 1000);
+}
+
+function stopDashAutoRefresh() {
+  clearInterval(dashRefreshTimer);
+}
+
+function dashRefreshAll() {
+  dashArrivalCache = {};
+  dashFetchQueue = state.favourites.map(f => f.code);
+  processDashFetchQueue();
+  showToast("Refreshing all stops...");
+}
+
+function renderDashReminders() {
+  const container = document.getElementById("dashDeptReminders");
+  const empty = document.getElementById("dashDeptEmpty");
+  if (!container) return;
+
+  if (state.departureReminders.length === 0) {
+    container.innerHTML = "";
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+
+  container.innerHTML = state.departureReminders.map(r => {
+    const statusCls = r.enabled ? "active" : "idle";
+    const statusText = r.enabled ? "Active" : "Off";
+    const nextTrigger = r.enabled ? computeNextTrigger(r) : "";
+    return `
+      <div class="card dash-reminder-card ${r.enabled ? '' : 'dash-disabled'}">
+        <div class="dash-reminder-top">
+          <span class="reminder-value">${r.nickname}</span>
+          <span class="reminder-status ${statusCls}">${statusText}</span>
+        </div>
+        <div class="reminder-label">Bus ${r.service} @ stop ${r.stop} &middot; Leave by ${r.time} &middot; Alert ${r.leadMin}min before</div>
+        ${nextTrigger ? `<div class="dash-next-trigger">${nextTrigger}</div>` : ""}
+      </div>`;
+  }).join("");
+}
+
+function computeNextTrigger(reminder) {
+  const now = new Date();
+  const [h, m] = reminder.time.split(":").map(Number);
+  const target = new Date();
+  target.setHours(h, m, 0, 0);
+  if (target <= now) return `Next: Tomorrow ${reminder.time}`;
+  const diffMin = Math.round((target - now) / 60000);
+  if (diffMin <= 60) return `Next: in ${diffMin} min`;
+  return `Next: Today ${reminder.time}`;
+}
+
+function renderDashDropoffs() {
+  const container = document.getElementById("dashDropoffs");
+  const empty = document.getElementById("dashDropoffEmpty");
+  if (!container) return;
+
+  if (state.dropoffAlerts.length === 0) {
+    container.innerHTML = "";
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+
+  container.innerHTML = state.dropoffAlerts.map(a => {
+    const isActive = activeDropoff && activeDropoff.id === a.id;
+    return `
+      <div class="card dash-dropoff-card ${isActive ? 'dash-dropoff-active' : ''}">
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${isActive ? '<div class="pulse"></div>' : ''}
+          <div>
+            <div class="reminder-value">${a.nickname}</div>
+            <div class="reminder-label">Stop ${a.stopCode} &middot; ${a.radius}m radius${isActive ? ' &middot; Tracking' : ''}${a.lat ? '' : ' &middot; &#9888; resolving...'}</div>
+          </div>
+        </div>
+        <button class="btn btn-sm ${isActive ? 'btn-danger' : 'btn-ghost'}"
+                onclick="${isActive ? 'stopDropoff()' : `startDropoff('${a.id}')`}">
+          ${isActive ? 'Stop' : 'Start'}
+        </button>
+      </div>`;
+  }).join("");
+}
+
+// ── Map ──
+function initMap() {
+  map = L.map("busMap", { zoomControl: true }).setView([1.3521, 103.8198], 12);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 19,
+  }).addTo(map);
+  mapMarkers = L.markerClusterGroup({ maxClusterRadius: 50 });
+  map.addLayer(mapMarkers);
+  loadMapStops();
+  locateOnMap();
+}
+
+async function loadMapStops() {
+  try {
+    const stops = await loadBusStops();
+    stops.forEach(s => {
+      if (!s.Latitude || !s.Longitude) return;
+      const isFav = state.favourites.some(f => f.code === s.BusStopCode);
+      const marker = L.circleMarker([s.Latitude, s.Longitude], {
+        radius: 6, fillColor: "#4e8cff", color: "#3a6fd8",
+        weight: 1, opacity: 0.8, fillOpacity: 0.6,
+      });
+      marker.bindPopup(`
+        <div class="popup-name">${s.Description}</div>
+        <div class="popup-detail">${s.BusStopCode} &middot; ${s.RoadName}</div>
+        <div class="popup-actions">
+          <button class="btn btn-sm" onclick="goToStop('${s.BusStopCode}')">View Arrivals</button>
+          <button class="icon-btn ${isFav ? 'active' : ''}" onclick="toggleFav('${s.BusStopCode}','${escapeHtml(s.Description)}')" title="Favourite">&#9733;</button>
+        </div>
+      `);
+      mapMarkers.addLayer(marker);
+    });
+  } catch {
+    showToast("Failed to load bus stops on map");
+  }
+}
+
+function locateOnMap() {
+  if (!map || !navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const { latitude, longitude } = pos.coords;
+      map.setView([latitude, longitude], 16);
+      if (mapUserMarker) map.removeLayer(mapUserMarker);
+      mapUserMarker = L.circleMarker([latitude, longitude], {
+        radius: 10, fillColor: "#34d399", color: "#fff",
+        weight: 3, opacity: 1, fillOpacity: 0.9,
+      }).addTo(map).bindPopup("You are here");
+    },
+    () => {},
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
 }
 
 // ── Nearby Stops ──
