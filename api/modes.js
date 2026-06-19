@@ -1,4 +1,27 @@
-const { kv } = require("@vercel/kv");
+const SB_URL = process.env.SUPABASE_URL;
+const SB_KEY = process.env.SUPABASE_ANON_KEY;
+const HEADERS = {
+  apikey: SB_KEY,
+  Authorization: `Bearer ${SB_KEY}`,
+  "Content-Type": "application/json",
+  Prefer: "return=minimal",
+};
+
+async function getModes() {
+  const res = await fetch(`${SB_URL}/rest/v1/modes?id=eq.1&select=data`, {
+    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
+  });
+  const rows = await res.json();
+  return rows[0]?.data || [];
+}
+
+async function setModes(modes) {
+  await fetch(`${SB_URL}/rest/v1/modes?id=eq.1`, {
+    method: "PATCH",
+    headers: HEADERS,
+    body: JSON.stringify({ data: modes }),
+  });
+}
 
 module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -9,8 +32,7 @@ module.exports = async (req, res) => {
 
   if (req.method === "GET") {
     try {
-      const modes = (await kv.get("modes")) || [];
-      return res.json(modes);
+      return res.json(await getModes());
     } catch {
       return res.json([]);
     }
@@ -21,7 +43,7 @@ module.exports = async (req, res) => {
       const modes = req.body;
       if (!Array.isArray(modes))
         return res.status(400).json({ error: "Expected array" });
-      await kv.set("modes", modes);
+      await setModes(modes);
       return res.json({ ok: true });
     } catch (e) {
       return res.status(500).json({ error: e.message });

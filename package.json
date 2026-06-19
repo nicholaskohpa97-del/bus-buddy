@@ -2,8 +2,5 @@
   "name": "bus-buddy",
   "version": "1.0.0",
   "private": true,
-  "description": "Singapore bus timing checker with reminders",
-  "dependencies": {
-    "@vercel/kv": "^3.0.0"
-  }
+  "description": "Singapore bus timing checker with reminders"
 }

@@ -1,13 +1,66 @@
-const { kv } = require("@vercel/kv");
-
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TG_API = `https://api.telegram.org/bot${TOKEN}`;
+const SB_URL = process.env.SUPABASE_URL;
+const SB_KEY = process.env.SUPABASE_ANON_KEY;
+const SB_HEADERS = {
+  apikey: SB_KEY,
+  Authorization: `Bearer ${SB_KEY}`,
+  "Content-Type": "application/json",
+  Prefer: "return=minimal",
+};
 
 async function sendMessage(chatId, text) {
   await fetch(`${TG_API}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" }),
+  });
+}
+
+async function getModes() {
+  const res = await fetch(`${SB_URL}/rest/v1/modes?id=eq.1&select=data`, {
+    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
+  });
+  const rows = await res.json();
+  return rows[0]?.data || [];
+}
+
+async function setModes(modes) {
+  await fetch(`${SB_URL}/rest/v1/modes?id=eq.1`, {
+    method: "PATCH",
+    headers: SB_HEADERS,
+    body: JSON.stringify({ data: modes }),
+  });
+}
+
+async function getSession(chatId) {
+  const res = await fetch(
+    `${SB_URL}/rest/v1/tg_sessions?chat_id=eq.${chatId}&select=data,updated_at`,
+    { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } }
+  );
+  const rows = await res.json();
+  if (!rows[0]) return null;
+  // Expire sessions older than 10 minutes
+  const age = Date.now() - new Date(rows[0].updated_at).getTime();
+  if (age > 10 * 60 * 1000) {
+    await delSession(chatId);
+    return null;
+  }
+  return rows[0].data;
+}
+
+async function setSession(chatId, data) {
+  await fetch(`${SB_URL}/rest/v1/tg_sessions`, {
+    method: "POST",
+    headers: { ...SB_HEADERS, Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify({ chat_id: chatId, data, updated_at: new Date().toISOString() }),
+  });
+}
+
+async function delSession(chatId) {
+  await fetch(`${SB_URL}/rest/v1/tg_sessions?chat_id=eq.${chatId}`, {
+    method: "DELETE",
+    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
   });
 }
 
@@ -44,7 +97,6 @@ module.exports = async (req, res) => {
 
   const chatId = message.chat.id;
   const text = message.text.trim();
-  const stateKey = `tg_state_${chatId}`;
 
   if (text === "/start" || text === "/help") {
     await sendMessage(chatId,
@@ -59,7 +111,7 @@ module.exports = async (req, res) => {
   }
 
   if (text === "/modes") {
-    const modes = (await kv.get("modes")) || [];
+    const modes = await getModes();
     if (modes.length === 0) {
       await sendMessage(chatId, "No journey modes saved yet. Use /newmode to create one.");
     } else {
@@ -78,32 +130,32 @@ module.exports = async (req, res) => {
   const deleteMatch = text.match(/^\/deletemode\s+(\d+)$/);
   if (deleteMatch) {
     const idx = parseInt(deleteMatch[1]) - 1;
-    const modes = (await kv.get("modes")) || [];
+    const modes = await getModes();
     if (idx < 0 || idx >= modes.length) {
       await sendMessage(chatId, `Invalid number. You have ${modes.length} mode(s). Use /modes to see the list.`);
     } else {
       const deleted = modes.splice(idx, 1)[0];
-      await kv.set("modes", modes);
+      await setModes(modes);
       await sendMessage(chatId, `✅ Deleted mode "<b>${deleted.name}</b>".`);
     }
-    await kv.del(stateKey);
+    await delSession(chatId);
     return res.status(200).end();
   }
 
   if (text === "/newmode") {
-    await kv.set(stateKey, { step: 0, data: {} }, { ex: 600 });
+    await setSession(chatId, { step: 0, data: {} });
     await sendMessage(chatId, `Let's create a new journey mode! 🚌\n\n${STEPS[0].prompt}`);
     return res.status(200).end();
   }
 
   if (text === "/cancel") {
-    await kv.del(stateKey);
+    await delSession(chatId);
     await sendMessage(chatId, "Cancelled.");
     return res.status(200).end();
   }
 
   // Conversation flow
-  const conv = await kv.get(stateKey);
+  const conv = await getSession(chatId);
   if (!conv) {
     await sendMessage(chatId, "Use /newmode to create a journey mode, or /help for all commands.");
     return res.status(200).end();
@@ -128,7 +180,7 @@ module.exports = async (req, res) => {
   } else if (step.key === "dropoffRadius") {
     value = isSkip ? 300 : parseInt(text);
     if (isNaN(value) || value < 100 || value > 1000) {
-      await sendMessage(chatId, "Please enter a radius between 100 and 1000 metres, or <code>skip</code> for the default (300m).");
+      await sendMessage(chatId, "Please enter a radius between 100 and 1000 metres, or <code>skip</code> for default (300m).");
       return res.status(200).end();
     }
   }
@@ -137,10 +189,10 @@ module.exports = async (req, res) => {
   conv.step += 1;
 
   if (conv.step < STEPS.length) {
-    await kv.set(stateKey, conv, { ex: 600 });
+    await setSession(chatId, conv);
     await sendMessage(chatId, STEPS[conv.step].prompt);
   } else {
-    await kv.del(stateKey);
+    await delSession(chatId);
     const d = conv.data;
     const mode = {
       id: Date.now().toString(36),
@@ -156,9 +208,9 @@ module.exports = async (req, res) => {
       active: false,
       createdVia: "telegram",
     };
-    const modes = (await kv.get("modes")) || [];
+    const modes = await getModes();
     modes.push(mode);
-    await kv.set("modes", modes);
+    await setModes(modes);
     await sendMessage(chatId,
       `✅ Mode "<b>${mode.name}</b>" saved!\n\n` +
       `🚌 Bus ${mode.service} from stop ${mode.departureStop}\n` +
