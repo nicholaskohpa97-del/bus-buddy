@@ -805,16 +805,23 @@ function initMap() {
   locateOnMap();
 }
 
+function makeBusStopIcon(isFav) {
+  return L.divIcon({
+    html: `<div class="map-pin-wrap"><div class="map-pin-head${isFav ? ' map-pin-head--fav' : ''}"><span class="map-pin-icon">🚌</span></div></div>`,
+    className: '',
+    iconSize: [22, 30],
+    iconAnchor: [11, 28],
+    popupAnchor: [0, -28],
+  });
+}
+
 async function loadMapStops() {
   try {
     const stops = await loadBusStops();
     stops.forEach(s => {
       if (!s.Latitude || !s.Longitude) return;
       const isFav = state.favourites.some(f => f.code === s.BusStopCode);
-      const marker = L.circleMarker([s.Latitude, s.Longitude], {
-        radius: 6, fillColor: "#0d9488", color: "#0f766e",
-        weight: 1, opacity: 0.8, fillOpacity: 0.6,
-      });
+      const marker = L.marker([s.Latitude, s.Longitude], { icon: makeBusStopIcon(isFav) });
       marker.bindPopup(`
         <div class="popup-name">${s.Description}</div>
         <div class="popup-detail">${s.BusStopCode} &middot; ${s.RoadName}</div>
