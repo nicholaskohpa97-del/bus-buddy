@@ -809,7 +809,7 @@ async function loadMapStops() {
       if (!s.Latitude || !s.Longitude) return;
       const isFav = state.favourites.some(f => f.code === s.BusStopCode);
       const marker = L.circleMarker([s.Latitude, s.Longitude], {
-        radius: 6, fillColor: "#4e8cff", color: "#3a6fd8",
+        radius: 6, fillColor: "#0d9488", color: "#0f766e",
         weight: 1, opacity: 0.8, fillOpacity: 0.6,
       });
       marker.bindPopup(`
@@ -835,7 +835,7 @@ function locateOnMap() {
       map.setView([latitude, longitude], 16);
       if (mapUserMarker) map.removeLayer(mapUserMarker);
       mapUserMarker = L.circleMarker([latitude, longitude], {
-        radius: 10, fillColor: "#34d399", color: "#fff",
+        radius: 10, fillColor: "#10b981", color: "#fff",
         weight: 3, opacity: 1, fillOpacity: 0.9,
       }).addTo(map).bindPopup("You are here");
     },
