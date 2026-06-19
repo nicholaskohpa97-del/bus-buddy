@@ -610,6 +610,18 @@
     .leaflet-popup-content .popup-name { font-weight: 700; font-size: 14px; }
     .leaflet-popup-content .popup-detail { color: var(--text2); font-size: 12px; margin: 4px 0 10px; }
     .leaflet-popup-content .popup-actions { display: flex; gap: 6px; }
+    .map-pin-wrap { position: relative; width: 22px; height: 30px; }
+    .map-pin-head {
+      width: 22px; height: 22px;
+      background: var(--accent);
+      border: 2.5px solid white;
+      border-radius: 50% 50% 50% 0;
+      transform: rotate(-45deg);
+      box-shadow: 0 2px 6px rgba(0,0,0,0.38);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .map-pin-head--fav { background: var(--yellow); }
+    .map-pin-icon { transform: rotate(45deg); font-size: 11px; display: block; }
     .leaflet-popup-close-button { color: var(--text2) !important; }
 
     /* ── Section Divider ── */
@@ -794,6 +806,9 @@
       <input type="number" id="refreshInterval" value="30" min="10" max="120">
       <label>Departure reminder lead time (minutes)</label>
       <input type="number" id="reminderLead" value="5" min="1" max="30">
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+        <button class="btn btn-ghost" onclick="sendNotification('Test Alert','Audio and notifications are working!')">Test Alert Sound</button>
+      </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="document.getElementById('settingsModal').classList.add('hidden')">Cancel</button>
         <button class="btn" onclick="saveSettings()">Save</button>

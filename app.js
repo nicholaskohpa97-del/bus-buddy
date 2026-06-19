@@ -14,6 +14,7 @@ let refreshTimer = null;
 let deptCheckTimer = null;
 let dropoffWatchId = null;
 let activeDropoff = null;
+let audioCtx = null;
 
 // Dashboard state
 let dashFetchQueue = [];
@@ -48,6 +49,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   startDashAutoRefresh();
   requestNotificationPermission();
   startDepartureChecker();
+  document.addEventListener('click', unlockAudio, { once: true });
+  document.addEventListener('touchstart', unlockAudio, { once: true });
 });
 
 // ── API ──
@@ -802,16 +805,23 @@ function initMap() {
   locateOnMap();
 }
 
+function makeBusStopIcon(isFav) {
+  return L.divIcon({
+    html: `<div class="map-pin-wrap"><div class="map-pin-head${isFav ? ' map-pin-head--fav' : ''}"><span class="map-pin-icon">🚌</span></div></div>`,
+    className: '',
+    iconSize: [22, 30],
+    iconAnchor: [11, 28],
+    popupAnchor: [0, -28],
+  });
+}
+
 async function loadMapStops() {
   try {
     const stops = await loadBusStops();
     stops.forEach(s => {
       if (!s.Latitude || !s.Longitude) return;
       const isFav = state.favourites.some(f => f.code === s.BusStopCode);
-      const marker = L.circleMarker([s.Latitude, s.Longitude], {
-        radius: 6, fillColor: "#0d9488", color: "#0f766e",
-        weight: 1, opacity: 0.8, fillOpacity: 0.6,
-      });
+      const marker = L.marker([s.Latitude, s.Longitude], { icon: makeBusStopIcon(isFav) });
       marker.bindPopup(`
         <div class="popup-name">${s.Description}</div>
         <div class="popup-detail">${s.BusStopCode} &middot; ${s.RoadName}</div>
@@ -927,16 +937,77 @@ async function saveSettings() {
   document.getElementById("settingsModal").classList.add("hidden");
 }
 
+// ── Audio ──
+function ensureAudioContext() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function unlockAudio() {
+  ensureAudioContext();
+}
+
+function playAlertSound() {
+  try {
+    const ctx = ensureAudioContext();
+    const notes = [
+      [880,  0.0,  0.15, 0.4],
+      [1046, 0.18, 0.15, 0.4],
+      [880,  0.36, 0.25, 0.3],
+    ];
+    const now = ctx.currentTime;
+    notes.forEach(([freq, start, dur, gain]) => {
+      const osc = ctx.createOscillator();
+      const amp = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + start);
+      amp.gain.setValueAtTime(0, now + start);
+      amp.gain.linearRampToValueAtTime(gain, now + start + 0.02);
+      amp.gain.exponentialRampToValueAtTime(0.001, now + start + dur);
+      osc.connect(amp);
+      amp.connect(ctx.destination);
+      osc.start(now + start);
+      osc.stop(now + start + dur + 0.05);
+    });
+  } catch (e) {
+    console.warn('Audio alert failed:', e);
+  }
+}
+
+function triggerVibration() {
+  if ('vibrate' in navigator) {
+    navigator.vibrate([200, 100, 200, 100, 400]);
+  }
+}
+
 // ── Notifications ──
 function requestNotificationPermission() {
-  if ("Notification" in window && Notification.permission === "default") {
-    Notification.requestPermission();
+  if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') {
+    ensureAudioContext();
+    return;
+  }
+  if (Notification.permission === 'default') {
+    Notification.requestPermission().then(permission => {
+      if (permission === 'granted') ensureAudioContext();
+    });
   }
 }
 
 function sendNotification(title, body) {
-  if ("Notification" in window && Notification.permission === "granted") {
-    new Notification(title, { body, icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🚌</text></svg>" });
+  playAlertSound();
+  triggerVibration();
+  if ('Notification' in window && Notification.permission === 'granted') {
+    new Notification(title, {
+      body,
+      icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🚌</text></svg>",
+      requireInteraction: true,
+      tag: 'bus-buddy-alert',
+      renotify: true,
+    });
   }
   showToast(`${title} - ${body}`);
 }
