@@ -283,6 +283,16 @@
       align-items: center;
       justify-content: space-between;
     }
+    .reminder-card--active {
+      background: var(--accent-bg);
+      border: 1.5px solid var(--accent);
+    }
+    .modal-section-divider {
+      font-size: 11px; font-weight: 700; color: var(--text2);
+      text-transform: uppercase; letter-spacing: 0.08em;
+      margin: 16px 0 8px; padding-top: 14px;
+      border-top: 1px solid var(--border);
+    }
     .reminder-info {
       display: flex;
       flex-direction: column;
@@ -743,6 +753,12 @@
     <!-- REMINDERS TAB -->
     <div id="tab-reminders" class="hidden">
       <div class="card">
+        <h3>Journey Modes</h3>
+        <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">One tap to arm your departure reminder and drop-off alert together.</p>
+        <button class="btn" onclick="openModeModal()">+ Add Journey Mode</button>
+        <div id="modesContainer" style="margin-top:12px;"></div>
+      </div>
+      <div class="card" style="margin-top:12px;">
         <h3>Departure Reminders</h3>
         <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">Get notified when your bus is arriving so you know when to leave.</p>
         <button class="btn" onclick="openDepartureReminderModal()">+ Add Departure Reminder</button>
@@ -833,6 +849,33 @@
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="document.getElementById('deptReminderModal').classList.add('hidden')">Cancel</button>
         <button class="btn" onclick="saveDepartureReminder()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODE MODAL -->
+  <div id="modeModal" class="modal-overlay hidden" onclick="closeModal(event, 'modeModal')">
+    <div class="modal" onclick="event.stopPropagation()">
+      <h3>Add Journey Mode</h3>
+      <label>Mode Name</label>
+      <input type="text" id="modeNameInput" placeholder="e.g. Going home from the office">
+      <p class="modal-section-divider">Departure</p>
+      <label>Bus Stop Code</label>
+      <input type="text" id="modeDeptStop" placeholder="e.g. 83139">
+      <label>Bus Service Number</label>
+      <input type="text" id="modeDeptService" placeholder="e.g. 14">
+      <label>Leave by</label>
+      <input type="time" id="modeLeaveTime" value="08:00">
+      <label>Alert when bus is within (minutes)</label>
+      <input type="number" id="modeLeadMin" value="5" min="1" max="30">
+      <p class="modal-section-divider">Drop-off</p>
+      <label>Destination Stop Code</label>
+      <input type="text" id="modeDropoffStop" placeholder="e.g. 44009">
+      <label>Alert radius (meters)</label>
+      <input type="number" id="modeDropoffRadius" value="300" min="100" max="1000" step="50">
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="document.getElementById('modeModal').classList.add('hidden')">Cancel</button>
+        <button class="btn" onclick="saveMode()">Save Mode</button>
       </div>
     </div>
   </div>
