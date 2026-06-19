@@ -6,6 +6,7 @@ let state = {
   favourites: JSON.parse(localStorage.getItem("bb_favourites") || "[]"),
   departureReminders: JSON.parse(localStorage.getItem("bb_deptReminders") || "[]"),
   dropoffAlerts: JSON.parse(localStorage.getItem("bb_dropoffAlerts") || "[]"),
+  modes: JSON.parse(localStorage.getItem("bb_modes") || "[]"),
   busStops: null,
   currentStop: null,
 };
@@ -45,6 +46,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderFavourites();
   renderDepartureReminders();
   renderDropoffAlerts();
+  loadModes();
   refreshDashboard();
   startDashAutoRefresh();
   requestNotificationPermission();
@@ -381,12 +383,13 @@ function toggleDeptReminder(id) {
 
 function renderDepartureReminders() {
   const container = document.getElementById("departureReminders");
-  if (state.departureReminders.length === 0) {
+  const visible = state.departureReminders.filter(r => !r.fromMode);
+  if (visible.length === 0) {
     container.innerHTML =
       '<p style="color:var(--text2);font-size:13px;">No reminders set.</p>';
     return;
   }
-  container.innerHTML = state.departureReminders
+  container.innerHTML = visible
     .map(
       (r) => `
     <div class="reminder-card">
@@ -503,12 +506,13 @@ function deleteDropoffAlert(id) {
 
 function renderDropoffAlerts() {
   const container = document.getElementById("dropoffReminders");
-  if (state.dropoffAlerts.length === 0) {
+  const visible = state.dropoffAlerts.filter(a => !a.fromMode);
+  if (visible.length === 0) {
     container.innerHTML =
       '<p style="color:var(--text2);font-size:13px;">No drop-off alerts set.</p>';
     return;
   }
-  container.innerHTML = state.dropoffAlerts
+  container.innerHTML = visible
     .map(
       (a) => `
     <div class="reminder-card">
@@ -592,6 +596,176 @@ function haversine(lat1, lon1, lat2, lon2) {
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ── Journey Modes ──
+async function postModes(modes) {
+  localStorage.setItem("bb_modes", JSON.stringify(modes));
+  try {
+    await fetch("/api/modes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(modes),
+    });
+  } catch {}
+}
+
+async function loadModes() {
+  try {
+    const remote = await fetch("/api/modes").then(r => r.json());
+    if (Array.isArray(remote)) {
+      state.modes = remote;
+      localStorage.setItem("bb_modes", JSON.stringify(remote));
+    }
+  } catch {}
+  renderModes();
+}
+
+function openModeModal() {
+  document.getElementById("modeModal").classList.remove("hidden");
+}
+
+async function saveMode() {
+  const name = document.getElementById("modeNameInput").value.trim();
+  const departureStop = document.getElementById("modeDeptStop").value.trim();
+  const service = document.getElementById("modeDeptService").value.trim();
+  const leaveTime = document.getElementById("modeLeaveTime").value;
+  const leadMin = parseInt(document.getElementById("modeLeadMin").value) || 5;
+  const dropoffStop = document.getElementById("modeDropoffStop").value.trim();
+  const dropoffRadius = parseInt(document.getElementById("modeDropoffRadius").value) || 300;
+
+  if (!name || !departureStop || !service || !dropoffStop) {
+    showToast("Please fill in all required fields");
+    return;
+  }
+
+  const mode = {
+    id: Date.now().toString(36),
+    name,
+    departureStop,
+    service,
+    leaveTime,
+    leadMin,
+    dropoffStop,
+    dropoffRadius,
+    dropoffLat: null,
+    dropoffLng: null,
+    active: false,
+    createdVia: "app",
+  };
+
+  state.modes.push(mode);
+  await postModes(state.modes);
+  document.getElementById("modeModal").classList.add("hidden");
+  renderModes();
+  resolveModDropoffCoords(mode);
+  showToast("Journey mode saved");
+}
+
+async function resolveModDropoffCoords(mode) {
+  try {
+    const stops = await loadBusStops();
+    const stop = stops.find(s => s.BusStopCode === mode.dropoffStop);
+    if (stop) {
+      mode.dropoffLat = stop.Latitude;
+      mode.dropoffLng = stop.Longitude;
+      await postModes(state.modes);
+      renderModes();
+    }
+  } catch {}
+}
+
+function renderModes() {
+  const container = document.getElementById("modesContainer");
+  if (!container) return;
+  if (state.modes.length === 0) {
+    container.innerHTML = '<p style="color:var(--text2);font-size:13px;">No modes saved yet. Add one to combine your bus reminder and drop-off alert in one tap.</p>';
+    return;
+  }
+  container.innerHTML = state.modes.map(m => `
+    <div class="reminder-card${m.active ? " reminder-card--active" : ""}">
+      <div class="reminder-info">
+        <span class="reminder-value">${m.name}</span>
+        <span class="reminder-label">&#128652; Bus ${m.service} from stop ${m.departureStop} &middot; Leave by ${m.leaveTime} &middot; ${m.leadMin}min alert</span>
+        <span class="reminder-label">&#128205; Drop-off stop ${m.dropoffStop} &middot; ${m.dropoffRadius}m ${m.dropoffLat ? "&#9989;" : "&#9888; resolving..."}</span>
+      </div>
+      <div style="display:flex;gap:4px;align-items:center;">
+        <button class="btn btn-sm${m.active ? " btn-danger" : ""}" onclick="${m.active ? `deactivateMode('${m.id}')` : `activateMode('${m.id}')`}">
+          ${m.active ? "Deactivate" : "Activate"}
+        </button>
+        <button class="icon-btn" onclick="deleteMode('${m.id}')" title="Delete">&#10005;</button>
+      </div>
+    </div>`).join("");
+}
+
+async function activateMode(id) {
+  const prev = state.modes.find(m => m.active);
+  if (prev && prev.id !== id) await deactivateMode(prev.id);
+
+  const mode = state.modes.find(m => m.id === id);
+  if (!mode) return;
+  if (!mode.dropoffLat || !mode.dropoffLng) {
+    showToast("Coordinates not resolved yet. Try again in a moment.");
+    return;
+  }
+
+  const reminder = {
+    id: `mode_${mode.id}`,
+    stop: mode.departureStop,
+    service: mode.service,
+    time: mode.leaveTime,
+    leadMin: mode.leadMin,
+    nickname: mode.name,
+    enabled: true,
+    fromMode: mode.id,
+  };
+  state.departureReminders = state.departureReminders.filter(r => r.fromMode !== mode.id);
+  state.departureReminders.push(reminder);
+  localStorage.setItem("bb_deptReminders", JSON.stringify(state.departureReminders));
+
+  const dropoff = {
+    id: `mode_${mode.id}_drop`,
+    stopCode: mode.dropoffStop,
+    radius: mode.dropoffRadius,
+    nickname: mode.name,
+    lat: mode.dropoffLat,
+    lng: mode.dropoffLng,
+    fromMode: mode.id,
+  };
+  state.dropoffAlerts = state.dropoffAlerts.filter(a => a.fromMode !== mode.id);
+  state.dropoffAlerts.push(dropoff);
+  localStorage.setItem("bb_dropoffAlerts", JSON.stringify(state.dropoffAlerts));
+
+  mode.active = true;
+  await postModes(state.modes);
+  startDropoff(`mode_${mode.id}_drop`);
+  renderModes();
+  renderDepartureReminders();
+}
+
+async function deactivateMode(id) {
+  const mode = state.modes.find(m => m.id === id);
+  if (!mode) return;
+
+  if (activeDropoff && activeDropoff.id === `mode_${mode.id}_drop`) stopDropoff();
+  state.departureReminders = state.departureReminders.filter(r => r.fromMode !== mode.id);
+  localStorage.setItem("bb_deptReminders", JSON.stringify(state.departureReminders));
+  state.dropoffAlerts = state.dropoffAlerts.filter(a => a.fromMode !== mode.id);
+  localStorage.setItem("bb_dropoffAlerts", JSON.stringify(state.dropoffAlerts));
+
+  mode.active = false;
+  await postModes(state.modes);
+  renderModes();
+  renderDepartureReminders();
+  renderDropoffAlerts();
+}
+
+async function deleteMode(id) {
+  const mode = state.modes.find(m => m.id === id);
+  if (mode && mode.active) await deactivateMode(id);
+  state.modes = state.modes.filter(m => m.id !== id);
+  await postModes(state.modes);
+  renderModes();
 }
 
 // ── Dashboard ──
