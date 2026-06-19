@@ -794,6 +794,9 @@
       <input type="number" id="refreshInterval" value="30" min="10" max="120">
       <label>Departure reminder lead time (minutes)</label>
       <input type="number" id="reminderLead" value="5" min="1" max="30">
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
+        <button class="btn btn-ghost" onclick="sendNotification('Test Alert','Audio and notifications are working!')">Test Alert Sound</button>
+      </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="document.getElementById('settingsModal').classList.add('hidden')">Cancel</button>
         <button class="btn" onclick="saveSettings()">Save</button>
