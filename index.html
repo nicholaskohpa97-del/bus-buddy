@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#4e8cff">
+  <meta name="theme-color" content="#0d9488">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/icon-192.svg">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -14,31 +14,37 @@
   <title>Bus Buddy - Singapore</title>
   <style>
     :root {
-      --bg: #0f1117;
-      --surface: #1a1d27;
-      --surface2: #242836;
-      --border: #2e3345;
-      --text: #e8eaed;
-      --text2: #9aa0b0;
-      --accent: #4e8cff;
-      --accent2: #3a6fd8;
-      --green: #34d399;
-      --yellow: #fbbf24;
-      --red: #f87171;
-      --orange: #fb923c;
-      --radius: 12px;
+      --bg: #f5f5f4;
+      --surface: #ffffff;
+      --surface2: #f5f5f4;
+      --border: #e7e5e4;
+      --text: #1c1917;
+      --text2: #78716c;
+      --accent: #0d9488;
+      --accent2: #0f766e;
+      --accent-bg: rgba(13,148,136,0.08);
+      --green: #10b981;
+      --yellow: #f59e0b;
+      --red: #ef4444;
+      --orange: #f97316;
+      --radius: 16px;
+      --radius-sm: 12px;
+      --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
       background: var(--bg);
       color: var(--text);
       min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
     }
+
+    /* ── Header ── */
     header {
       background: var(--surface);
       border-bottom: 1px solid var(--border);
-      padding: 16px 20px;
+      padding: 14px 20px;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -48,24 +54,31 @@
     }
     header h1 {
       font-size: 20px;
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      gap: 8px;
+      font-weight: 800;
+      letter-spacing: -0.3px;
+      color: var(--text);
+    }
+    .header-subtitle {
+      font-size: 12px;
+      color: var(--text2);
+      font-weight: 400;
     }
     .header-actions { display: flex; gap: 8px; }
+
+    /* ── Buttons ── */
     .btn {
       background: var(--accent);
       color: #fff;
       border: none;
       padding: 8px 16px;
-      border-radius: 8px;
+      border-radius: 10px;
       cursor: pointer;
       font-size: 14px;
-      font-weight: 500;
-      transition: background 0.15s;
+      font-weight: 600;
+      transition: all 0.15s;
     }
     .btn:hover { background: var(--accent2); }
+    .btn:active { transform: scale(0.97); }
     .btn-ghost {
       background: transparent;
       border: 1px solid var(--border);
@@ -74,18 +87,70 @@
     .btn-ghost:hover { background: var(--surface2); color: var(--text); }
     .btn-sm { padding: 6px 12px; font-size: 12px; }
     .btn-danger { background: var(--red); }
-    .btn-danger:hover { background: #ef4444; }
+    .btn-danger:hover { background: #dc2626; }
 
-    main { max-width: 600px; margin: 0 auto; padding: 16px; }
+    /* ── Main content ── */
+    main { max-width: 480px; margin: 0 auto; padding: 16px 16px 100px; }
 
+    /* ── Cards ── */
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 16px;
       margin-bottom: 12px;
+      box-shadow: var(--shadow);
     }
 
+    /* ── Bottom Navigation ── */
+    .bottom-nav {
+      position: fixed;
+      inset-inline: 0;
+      bottom: 0;
+      z-index: 200;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      padding: 6px 0 env(safe-area-inset-bottom, 8px);
+    }
+    .bottom-nav-inner {
+      max-width: 480px;
+      margin: 0 auto;
+      display: flex;
+      align-items: stretch;
+      justify-content: space-around;
+      padding: 0 8px;
+    }
+    .tab {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      padding: 6px 4px 4px;
+      cursor: pointer;
+      border: none;
+      background: none;
+      color: var(--text2);
+      font-size: 11px;
+      font-weight: 500;
+      transition: color 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .tab svg { width: 22px; height: 22px; transition: color 0.15s; }
+    .tab .tab-pill {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 48px;
+      height: 32px;
+      border-radius: 16px;
+      transition: background 0.15s;
+    }
+    .tab.active { color: var(--accent); }
+    .tab.active .tab-pill { background: var(--accent-bg); }
+    .tab:hover:not(.active) { color: var(--text); }
+
+    /* ── Search ── */
     .search-bar {
       display: flex;
       gap: 8px;
@@ -93,69 +158,72 @@
     }
     .search-bar input {
       flex: 1;
-      background: var(--surface2);
+      background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      padding: 12px 14px 12px 40px;
       color: var(--text);
       font-size: 15px;
       outline: none;
+      box-shadow: var(--shadow);
+      transition: border-color 0.15s;
     }
     .search-bar input:focus { border-color: var(--accent); }
     .search-bar input::placeholder { color: var(--text2); }
-
-    .tabs {
-      display: flex;
-      gap: 4px;
-      margin-bottom: 16px;
-      background: var(--surface);
-      border-radius: 10px;
-      padding: 4px;
-      border: 1px solid var(--border);
-    }
-    .tab {
+    .search-wrapper {
       flex: 1;
-      padding: 8px;
-      text-align: center;
-      border-radius: 8px;
-      cursor: pointer;
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--text2);
-      transition: all 0.15s;
-      border: none;
-      background: none;
+      position: relative;
     }
-    .tab.active { background: var(--accent); color: #fff; }
-    .tab:hover:not(.active) { color: var(--text); background: var(--surface2); }
+    .search-icon {
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text2);
+      pointer-events: none;
+    }
+    .btn-nearme {
+      padding: 10px 14px;
+      font-size: 14px;
+      line-height: 1;
+      flex-shrink: 0;
+      border-radius: var(--radius-sm);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
 
+    /* ── Bus Stop Header ── */
     .bus-stop-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 12px;
     }
-    .bus-stop-header h3 { font-size: 16px; }
+    .bus-stop-header h3 { font-size: 16px; font-weight: 700; }
     .bus-stop-code {
-      font-size: 12px;
-      color: var(--text2);
-      background: var(--surface2);
+      font-size: 11px;
+      color: var(--accent);
+      background: var(--accent-bg);
       padding: 2px 8px;
-      border-radius: 4px;
+      border-radius: 6px;
+      font-weight: 600;
     }
 
+    /* ── Service Rows ── */
     .service-row {
       display: flex;
       align-items: center;
-      padding: 10px 0;
+      padding: 12px 0;
       border-bottom: 1px solid var(--border);
     }
     .service-row:last-child { border-bottom: none; }
     .service-number {
-      font-weight: 700;
+      font-weight: 800;
       font-size: 18px;
-      min-width: 60px;
-      color: var(--accent);
+      min-width: 56px;
+      color: var(--text);
+      letter-spacing: -0.3px;
     }
     .arrival-times {
       flex: 1;
@@ -163,22 +231,23 @@
       gap: 8px;
     }
     .arrival-badge {
-      padding: 4px 10px;
-      border-radius: 6px;
+      padding: 6px 12px;
+      border-radius: 10px;
       font-size: 13px;
-      font-weight: 600;
-      min-width: 40px;
+      font-weight: 700;
+      min-width: 44px;
       text-align: center;
     }
-    .arrival-badge.arriving { background: rgba(52,211,153,0.15); color: var(--green); }
-    .arrival-badge.soon { background: rgba(251,191,36,0.15); color: var(--yellow); }
-    .arrival-badge.later { background: rgba(78,140,255,0.1); color: var(--accent); }
+    .arrival-badge.arriving { background: rgba(16,185,129,0.1); color: var(--green); }
+    .arrival-badge.soon { background: rgba(245,158,11,0.1); color: var(--yellow); }
+    .arrival-badge.later { background: rgba(13,148,136,0.08); color: var(--accent); }
     .arrival-badge.na { background: var(--surface2); color: var(--text2); }
     .load-indicator {
-      font-size: 11px;
+      font-size: 10px;
       color: var(--text2);
       display: block;
       margin-top: 2px;
+      font-weight: 500;
     }
     .service-actions {
       display: flex;
@@ -186,13 +255,14 @@
       margin-left: 8px;
     }
 
+    /* ── Icon Buttons ── */
     .icon-btn {
       background: none;
       border: 1px solid var(--border);
       color: var(--text2);
-      width: 32px;
-      height: 32px;
-      border-radius: 6px;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
       cursor: pointer;
       display: flex;
       align-items: center;
@@ -203,10 +273,11 @@
     .icon-btn:hover { background: var(--surface2); color: var(--text); }
     .icon-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 
+    /* ── Reminders ── */
     .reminder-card {
       background: var(--surface2);
-      border-radius: 8px;
-      padding: 12px;
+      border-radius: var(--radius-sm);
+      padding: 14px;
       margin-top: 8px;
       display: flex;
       align-items: center;
@@ -218,66 +289,87 @@
       gap: 2px;
     }
     .reminder-label { font-size: 13px; color: var(--text2); }
-    .reminder-value { font-size: 14px; font-weight: 600; }
+    .reminder-value { font-size: 14px; font-weight: 700; }
     .reminder-status {
       font-size: 12px;
-      padding: 3px 8px;
-      border-radius: 4px;
+      padding: 3px 10px;
+      border-radius: 8px;
+      font-weight: 600;
     }
-    .reminder-status.active { background: rgba(52,211,153,0.15); color: var(--green); }
-    .reminder-status.idle { background: var(--surface); color: var(--text2); }
+    .reminder-status.active { background: rgba(16,185,129,0.1); color: var(--green); }
+    .reminder-status.idle { background: var(--surface2); color: var(--text2); border: 1px solid var(--border); }
 
+    /* ── Favourites ── */
     .fav-item {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 12px;
-      background: var(--surface2);
-      border-radius: 8px;
+      padding: 14px 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
       margin-bottom: 8px;
       cursor: pointer;
-      transition: background 0.15s;
+      transition: all 0.15s;
+      box-shadow: var(--shadow);
     }
-    .fav-item:hover { background: var(--border); }
-    .fav-name { font-weight: 600; }
-    .fav-detail { font-size: 13px; color: var(--text2); }
-
-    .modal-overlay {
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,0.6);
+    .fav-item:hover { border-color: rgba(13,148,136,0.3); }
+    .fav-name { font-weight: 700; font-size: 15px; }
+    .fav-detail { font-size: 13px; color: var(--text2); margin-top: 2px; }
+    .fav-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: var(--accent-bg);
+      color: var(--accent);
       display: flex;
       align-items: center;
       justify-content: center;
-      z-index: 200;
+      flex-shrink: 0;
+      margin-right: 12px;
+    }
+
+    /* ── Modals ── */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.4);
+      backdrop-filter: blur(4px);
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      z-index: 300;
       padding: 20px;
     }
     .modal {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: var(--radius);
+      border-radius: 20px 20px 20px 20px;
       padding: 24px;
       max-width: 420px;
       width: 100%;
+      box-shadow: 0 -4px 30px rgba(0,0,0,0.12);
     }
-    .modal h3 { margin-bottom: 16px; }
+    .modal h3 { margin-bottom: 16px; font-weight: 700; font-size: 18px; }
     .modal label {
       display: block;
       font-size: 13px;
       color: var(--text2);
       margin-bottom: 4px;
-      margin-top: 12px;
+      margin-top: 14px;
+      font-weight: 500;
     }
     .modal label:first-of-type { margin-top: 0; }
     .modal input, .modal select {
       width: 100%;
       background: var(--surface2);
       border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 8px 12px;
+      border-radius: 10px;
+      padding: 10px 14px;
       color: var(--text);
       font-size: 14px;
       outline: none;
+      transition: border-color 0.15s;
     }
     .modal input:focus { border-color: var(--accent); }
     .modal-actions {
@@ -287,23 +379,27 @@
       justify-content: flex-end;
     }
 
+    /* ── Empty State ── */
     .empty-state {
       text-align: center;
       padding: 40px 20px;
       color: var(--text2);
     }
-    .empty-state .icon { font-size: 40px; margin-bottom: 12px; }
-    .empty-state p { font-size: 14px; line-height: 1.5; }
+    .empty-state .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.6; }
+    .empty-state p { font-size: 14px; line-height: 1.6; }
 
+    /* ── Search Results ── */
     .search-results {
-      max-height: 250px;
+      max-height: 280px;
       overflow-y: auto;
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--radius-sm);
       margin-bottom: 12px;
+      background: var(--surface);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.08);
     }
     .search-result-item {
-      padding: 10px 14px;
+      padding: 12px 16px;
       cursor: pointer;
       border-bottom: 1px solid var(--border);
       transition: background 0.1s;
@@ -311,37 +407,34 @@
     .search-result-item:hover { background: var(--surface2); }
     .search-result-item:last-child { border-bottom: none; }
     .search-result-name { font-weight: 600; font-size: 14px; }
-    .search-result-detail { font-size: 12px; color: var(--text2); }
+    .search-result-detail { font-size: 12px; color: var(--text2); margin-top: 2px; }
 
-    .btn-nearme {
-      padding: 8px 12px;
-      font-size: 16px;
-      line-height: 1;
-      flex-shrink: 0;
-    }
-
+    /* ── Nearby Stops ── */
     .nearby-card {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      padding: 14px;
+      padding: 14px 16px;
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       margin-bottom: 8px;
       cursor: pointer;
-      transition: background 0.15s;
+      transition: all 0.15s;
+      box-shadow: var(--shadow);
     }
-    .nearby-card:hover { background: var(--surface2); }
+    .nearby-card:hover { border-color: rgba(13,148,136,0.3); }
     .nearby-info { flex: 1; min-width: 0; }
-    .nearby-name { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .nearby-name { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .nearby-detail { font-size: 12px; color: var(--text2); margin-top: 2px; }
     .nearby-dist {
       font-weight: 700;
-      font-size: 14px;
+      font-size: 13px;
       color: var(--accent);
       margin-left: 12px;
       white-space: nowrap;
+      background: var(--accent-bg);
+      padding: 4px 10px;
+      border-radius: 8px;
     }
     .nearby-header {
       display: flex;
@@ -349,19 +442,32 @@
       justify-content: space-between;
       margin-bottom: 12px;
     }
-    .nearby-header h3 { font-size: 15px; }
+    .nearby-header h3 { font-size: 16px; font-weight: 700; }
     .nearby-locating {
       text-align: center;
       padding: 30px 20px;
       color: var(--text2);
       font-size: 14px;
     }
+    .nearby-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: var(--accent-bg);
+      color: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      margin-right: 12px;
+    }
 
+    /* ── Drop-off Active ── */
     .dropoff-active {
-      background: rgba(251,146,60,0.1);
-      border: 1px solid var(--orange);
-      border-radius: 8px;
-      padding: 12px;
+      background: rgba(249,115,22,0.06);
+      border: 1px solid rgba(249,115,22,0.3);
+      border-radius: var(--radius-sm);
+      padding: 14px;
       margin-bottom: 12px;
       display: flex;
       align-items: center;
@@ -380,34 +486,39 @@
       50% { opacity: 0.5; transform: scale(1.3); }
     }
 
+    /* ── Auto Refresh Indicator ── */
     .auto-refresh {
       display: flex;
       align-items: center;
       gap: 6px;
       font-size: 12px;
-      color: var(--text2);
+      color: var(--green);
+      font-weight: 600;
     }
     .auto-refresh .dot {
       width: 6px;
       height: 6px;
       background: var(--green);
       border-radius: 50%;
+      animation: pulse 2s infinite;
     }
 
+    /* ── Toast ── */
     .notification-toast {
       position: fixed;
-      bottom: 20px;
+      bottom: 90px;
       left: 50%;
       transform: translateX(-50%);
-      background: var(--accent);
+      background: var(--text);
       color: #fff;
       padding: 12px 20px;
-      border-radius: 10px;
+      border-radius: 12px;
       font-size: 14px;
       font-weight: 500;
-      z-index: 300;
+      z-index: 400;
       animation: slideUp 0.3s;
       max-width: 90%;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.15);
     }
     @keyframes slideUp {
       from { transform: translateX(-50%) translateY(20px); opacity: 0; }
@@ -416,36 +527,34 @@
 
     .hidden { display: none !important; }
 
+    /* ── API Key Bar ── */
     .api-key-bar {
-      background: rgba(251,191,36,0.1);
-      border: 1px solid rgba(251,191,36,0.3);
-      border-radius: 8px;
-      padding: 12px 16px;
+      background: rgba(245,158,11,0.08);
+      border: 1px solid rgba(245,158,11,0.2);
+      border-radius: var(--radius-sm);
+      padding: 14px 16px;
       margin-bottom: 16px;
       display: flex;
       align-items: center;
       gap: 10px;
       font-size: 13px;
-      color: var(--yellow);
+      color: #92400e;
     }
-    .api-key-bar a {
-      color: var(--accent);
-      text-decoration: underline;
-    }
+    .api-key-bar a { color: var(--accent); text-decoration: underline; }
 
     @media (max-width: 380px) {
-      .tab { font-size: 11px; }
+      .tab { font-size: 10px; }
     }
 
     /* ── Dashboard ── */
-    .dash-section { margin-bottom: 20px; }
+    .dash-section { margin-bottom: 24px; }
     .dash-section-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 10px;
+      margin-bottom: 12px;
     }
-    .dash-section-header h3 { font-size: 15px; font-weight: 700; }
+    .dash-section-header h3 { font-size: 16px; font-weight: 700; }
     .dash-stop-card { margin-bottom: 10px; }
     .dash-stop-header {
       display: flex;
@@ -453,26 +562,26 @@
       align-items: center;
       margin-bottom: 8px;
     }
-    .dash-stop-name { font-weight: 600; font-size: 14px; margin-right: 8px; }
+    .dash-stop-name { font-weight: 700; font-size: 14px; margin-right: 8px; }
     .dash-loading, .dash-tap-load, .dash-no-service, .dash-error {
-      font-size: 12px; color: var(--text2); padding: 8px 0;
+      font-size: 13px; color: var(--text2); padding: 8px 0;
     }
     .dash-error { color: var(--red); }
     .dash-more-link {
-      padding: 8px 0 0; font-size: 12px; color: var(--accent); cursor: pointer;
+      padding: 8px 0 0; font-size: 13px; color: var(--accent); cursor: pointer; font-weight: 600;
     }
     .dash-more-link:hover { text-decoration: underline; }
-    .dash-reminder-card { margin-bottom: 8px; padding: 12px 16px; }
+    .dash-reminder-card { margin-bottom: 8px; padding: 14px 16px; }
     .dash-reminder-card.dash-disabled { opacity: 0.5; }
     .dash-reminder-top {
       display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;
     }
-    .dash-next-trigger { font-size: 11px; color: var(--yellow); margin-top: 4px; }
+    .dash-next-trigger { font-size: 11px; color: var(--yellow); margin-top: 4px; font-weight: 600; }
     .dash-dropoff-card {
-      margin-bottom: 8px; padding: 12px 16px;
+      margin-bottom: 8px; padding: 14px 16px;
       display: flex; align-items: center; justify-content: space-between;
     }
-    .dash-dropoff-active { background: rgba(251,146,60,0.1); border-color: var(--orange); }
+    .dash-dropoff-active { background: rgba(249,115,22,0.06); border-color: rgba(249,115,22,0.3); }
 
     /* ── Map ── */
     .map-wrap { position: relative; }
@@ -481,47 +590,59 @@
       height: calc(100vh - 140px);
       border-radius: var(--radius);
       border: 1px solid var(--border);
+      box-shadow: var(--shadow);
     }
     .map-locate-btn {
       position: absolute; top: 80px; left: 10px; z-index: 90;
       background: var(--surface); border: 1px solid var(--border);
-      color: var(--text); width: 36px; height: 36px; border-radius: 6px;
+      color: var(--accent); width: 40px; height: 40px; border-radius: 50%;
       cursor: pointer; font-size: 18px; display: flex; align-items: center;
-      justify-content: center;
+      justify-content: center; box-shadow: var(--shadow);
     }
     .map-locate-btn:hover { background: var(--surface2); }
     .leaflet-popup-content-wrapper {
       background: var(--surface) !important; color: var(--text) !important;
-      border: 1px solid var(--border) !important; border-radius: 8px !important;
+      border: 1px solid var(--border) !important; border-radius: 12px !important;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.1) !important;
     }
     .leaflet-popup-tip { background: var(--surface) !important; }
-    .leaflet-popup-content { margin: 10px 14px !important; font-size: 13px; }
-    .leaflet-popup-content .popup-name { font-weight: 600; font-size: 14px; }
-    .leaflet-popup-content .popup-detail { color: var(--text2); font-size: 12px; margin: 4px 0 8px; }
+    .leaflet-popup-content { margin: 12px 16px !important; font-size: 13px; }
+    .leaflet-popup-content .popup-name { font-weight: 700; font-size: 14px; }
+    .leaflet-popup-content .popup-detail { color: var(--text2); font-size: 12px; margin: 4px 0 10px; }
     .leaflet-popup-content .popup-actions { display: flex; gap: 6px; }
     .leaflet-popup-close-button { color: var(--text2) !important; }
+
+    /* ── Section Divider ── */
+    .section-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-bottom: 12px;
+    }
+    .section-label svg { width: 18px; height: 18px; }
   </style>
 </head>
 <body>
   <header>
-    <h1>Bus Buddy</h1>
+    <div>
+      <h1>Bus Buddy</h1>
+      <div class="header-subtitle">Singapore bus arrivals</div>
+    </div>
     <div class="header-actions">
-      <button class="btn btn-ghost btn-sm" onclick="openSettings()">Settings</button>
+      <button class="icon-btn" onclick="openSettings()" title="Settings">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
     </div>
   </header>
 
   <main>
     <div id="apiKeyBar" class="api-key-bar">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
       <span>Set your LTA DataMall API key to get started.</span>
       <button class="btn btn-sm" onclick="openSettings()">Set Key</button>
-    </div>
-
-    <div class="tabs">
-      <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Home</button>
-      <button class="tab" data-tab="arrivals" onclick="switchTab('arrivals')">Arrivals</button>
-      <button class="tab" data-tab="map" onclick="switchTab('map')">Map</button>
-      <button class="tab" data-tab="favourites" onclick="switchTab('favourites')">Favourites</button>
-      <button class="tab" data-tab="reminders" onclick="switchTab('reminders')">Reminders</button>
     </div>
 
     <!-- HOME / DASHBOARD TAB -->
@@ -564,9 +685,14 @@
     <!-- ARRIVALS TAB -->
     <div id="tab-arrivals" class="hidden">
       <div class="search-bar">
-        <input type="text" id="stopSearch" placeholder="Search stop name or code (e.g. 83139)" oninput="handleSearch(this.value)">
-        <button class="btn" onclick="searchStop()">Search</button>
-        <button class="btn btn-nearme" onclick="findNearbyStops()" title="Find nearest bus stops">&#128205;</button>
+        <div class="search-wrapper">
+          <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" id="stopSearch" placeholder="Search stop name, road or code" oninput="handleSearch(this.value)">
+        </div>
+        <button class="btn btn-nearme" onclick="findNearbyStops()" title="Find nearest bus stops">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
+          Nearby
+        </button>
       </div>
       <div id="searchResults" class="search-results hidden"></div>
       <div id="nearbyResults" class="hidden"></div>
@@ -574,7 +700,7 @@
         <div style="display:flex;align-items:center;">
           <div class="pulse"></div>
           <div>
-            <div style="font-weight:600;color:var(--orange);">Drop-off alert active</div>
+            <div style="font-weight:700;color:var(--orange);">Drop-off alert active</div>
             <div id="dropoffDetail" style="font-size:12px;color:var(--text2);"></div>
           </div>
         </div>
@@ -587,7 +713,9 @@
     <div id="tab-map" class="hidden">
       <div class="map-wrap">
         <div id="busMap"></div>
-        <button class="map-locate-btn" onclick="locateOnMap()" title="Find my location">&#128205;</button>
+        <button class="map-locate-btn" onclick="locateOnMap()" title="Find my location">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
+        </button>
       </div>
     </div>
 
@@ -604,18 +732,54 @@
     <div id="tab-reminders" class="hidden">
       <div class="card">
         <h3>Departure Reminders</h3>
-        <p style="font-size:13px;color:var(--text2);margin:8px 0 12px;">Get notified when your bus is arriving so you know when to leave.</p>
+        <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">Get notified when your bus is arriving so you know when to leave.</p>
         <button class="btn" onclick="openDepartureReminderModal()">+ Add Departure Reminder</button>
         <div id="departureReminders" style="margin-top:12px;"></div>
       </div>
       <div class="card" style="margin-top:12px;">
         <h3>Drop-off Alerts</h3>
-        <p style="font-size:13px;color:var(--text2);margin:8px 0 12px;">Get alerted when you're approaching your destination stop.</p>
+        <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">Get alerted when you're approaching your destination stop.</p>
         <button class="btn" onclick="openDropoffModal()">+ Add Drop-off Alert</button>
         <div id="dropoffReminders" style="margin-top:12px;"></div>
       </div>
     </div>
   </main>
+
+  <!-- BOTTOM NAVIGATION -->
+  <nav class="bottom-nav">
+    <div class="bottom-nav-inner">
+      <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">
+        <span class="tab-pill">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        </span>
+        Home
+      </button>
+      <button class="tab" data-tab="arrivals" onclick="switchTab('arrivals')">
+        <span class="tab-pill">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        </span>
+        Search
+      </button>
+      <button class="tab" data-tab="map" onclick="switchTab('map')">
+        <span class="tab-pill">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>
+        </span>
+        Map
+      </button>
+      <button class="tab" data-tab="favourites" onclick="switchTab('favourites')">
+        <span class="tab-pill">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        </span>
+        Favourites
+      </button>
+      <button class="tab" data-tab="reminders" onclick="switchTab('reminders')">
+        <span class="tab-pill">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        </span>
+        Reminders
+      </button>
+    </div>
+  </nav>
 
   <!-- SETTINGS MODAL -->
   <div id="settingsModal" class="modal-overlay hidden" onclick="closeModal(event, 'settingsModal')">

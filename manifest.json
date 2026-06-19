@@ -4,8 +4,8 @@
   "description": "Real-time Singapore bus arrivals with reminders",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0f1117",
-  "theme_color": "#4e8cff",
+  "background_color": "#f5f5f4",
+  "theme_color": "#0d9488",
   "icons": [
     {
       "src": "icon-192.svg",
