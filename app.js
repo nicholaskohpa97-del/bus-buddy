@@ -131,6 +131,7 @@ async function loadBusStops(forceRefresh = false) {
   showToast("Updating bus stop database...");
   try {
     const res = await fetch("/api/bus-stops");
+    if (!res.ok) throw new Error(`API error ${res.status}`);
     const data = await res.json();
     state.busStops = data.value || [];
     showToast(`Loaded ${state.busStops.length} bus stops`);
