@@ -755,7 +755,10 @@
       <div class="card">
         <h3>Journey Modes</h3>
         <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">One tap to arm your departure reminder and drop-off alert together.</p>
-        <button class="btn" onclick="openModeModal()">+ Add Journey Mode</button>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button class="btn" onclick="openModeModal()">+ Add Journey Mode</button>
+          <button class="btn btn-ghost btn-sm" onclick="sendNotification('Test Alert','Audio and notifications are working!')">&#128276; Test Alert</button>
+        </div>
         <div id="modesContainer" style="margin-top:12px;"></div>
       </div>
       <div class="card" style="margin-top:12px;">
