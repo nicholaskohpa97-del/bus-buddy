@@ -1090,7 +1090,40 @@ function openSettings() {
   document.getElementById("apiKeyInput").value = state.apiKey;
   document.getElementById("refreshInterval").value = state.refreshSec;
   document.getElementById("reminderLead").value = state.reminderLeadMin;
+  const soundName = localStorage.getItem('bb_alert_sound_name');
+  document.getElementById("alertSoundName").textContent = soundName || "Default chime";
+  document.getElementById("clearSoundBtn").style.display = soundName ? "" : "none";
   document.getElementById("settingsModal").classList.remove("hidden");
+}
+
+function saveAlertSound(input) {
+  const file = input.files[0];
+  if (!file) return;
+  if (file.size > 3 * 1024 * 1024) {
+    showToast("File too large — choose a sound under 3 MB.");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      localStorage.setItem('bb_alert_sound', e.target.result);
+      localStorage.setItem('bb_alert_sound_name', file.name);
+      document.getElementById("alertSoundName").textContent = file.name;
+      document.getElementById("clearSoundBtn").style.display = "";
+      new Audio(e.target.result).play().catch(() => {});
+    } catch {
+      showToast("Could not save audio — try a smaller file.");
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearAlertSound() {
+  localStorage.removeItem('bb_alert_sound');
+  localStorage.removeItem('bb_alert_sound_name');
+  document.getElementById("alertSoundName").textContent = "Default chime";
+  document.getElementById("clearSoundBtn").style.display = "none";
+  document.getElementById("alertSoundInput").value = "";
 }
 
 async function saveSettings() {
@@ -1128,6 +1161,18 @@ function unlockAudio() {
 }
 
 async function playAlertSound() {
+  const customSound = localStorage.getItem('bb_alert_sound');
+  if (customSound) {
+    try {
+      const audio = new Audio(customSound);
+      audio.volume = 1;
+      await audio.play();
+    } catch (e) {
+      console.error('Audio alert failed:', e);
+    }
+    return;
+  }
+  // Fallback: synthesized chime
   try {
     const ctx = await ensureAudioContext();
     const notes = [

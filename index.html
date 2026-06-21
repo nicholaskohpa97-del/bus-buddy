@@ -826,7 +826,16 @@
       <label>Departure reminder lead time (minutes)</label>
       <input type="number" id="reminderLead" value="5" min="1" max="30">
       <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border);">
-        <button class="btn btn-ghost" onclick="sendNotification('Test Alert','Audio and notifications are working!')">Test Alert Sound</button>
+        <label>Alert Sound</label>
+        <input type="file" id="alertSoundInput" accept="audio/*" style="display:none" onchange="saveAlertSound(this)">
+        <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('alertSoundInput').click()">&#127925; Choose audio file</button>
+          <span id="alertSoundName" style="font-size:13px;color:var(--text2);">Default chime</span>
+        </div>
+        <button id="clearSoundBtn" class="btn btn-ghost btn-sm" onclick="clearAlertSound()" style="display:none;margin-top:6px;color:var(--danger,#e55);">&#10005; Remove custom sound</button>
+        <div style="margin-top:14px;">
+          <button class="btn btn-ghost" onclick="sendNotification('Test Alert','Audio and notifications are working!')">&#128276; Test Alert</button>
+        </div>
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="document.getElementById('settingsModal').classList.add('hidden')">Cancel</button>
