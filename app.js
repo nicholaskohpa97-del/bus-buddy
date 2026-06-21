@@ -415,6 +415,7 @@ function quickDeptReminder(stopCode, serviceNo) {
 
 function startDepartureChecker() {
   clearInterval(deptCheckTimer);
+  checkDepartureReminders();
   deptCheckTimer = setInterval(checkDepartureReminders, 30000);
 }
 
@@ -443,7 +444,7 @@ async function checkDepartureReminders() {
           `${r.nickname} - Time to head to stop ${r.stop}`
         );
       }
-    } catch {}
+    } catch (e) { console.error('Reminder check failed:', e); }
   }
 }
 
@@ -1089,7 +1090,40 @@ function openSettings() {
   document.getElementById("apiKeyInput").value = state.apiKey;
   document.getElementById("refreshInterval").value = state.refreshSec;
   document.getElementById("reminderLead").value = state.reminderLeadMin;
+  const soundName = localStorage.getItem('bb_alert_sound_name');
+  document.getElementById("alertSoundName").textContent = soundName || "Default chime";
+  document.getElementById("clearSoundBtn").style.display = soundName ? "" : "none";
   document.getElementById("settingsModal").classList.remove("hidden");
+}
+
+function saveAlertSound(input) {
+  const file = input.files[0];
+  if (!file) return;
+  if (file.size > 3 * 1024 * 1024) {
+    showToast("File too large — choose a sound under 3 MB.");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      localStorage.setItem('bb_alert_sound', e.target.result);
+      localStorage.setItem('bb_alert_sound_name', file.name);
+      document.getElementById("alertSoundName").textContent = file.name;
+      document.getElementById("clearSoundBtn").style.display = "";
+      new Audio(e.target.result).play().catch(() => {});
+    } catch {
+      showToast("Could not save audio — try a smaller file.");
+    }
+  };
+  reader.readAsDataURL(file);
+}
+
+function clearAlertSound() {
+  localStorage.removeItem('bb_alert_sound');
+  localStorage.removeItem('bb_alert_sound_name');
+  document.getElementById("alertSoundName").textContent = "Default chime";
+  document.getElementById("clearSoundBtn").style.display = "none";
+  document.getElementById("alertSoundInput").value = "";
 }
 
 async function saveSettings() {
@@ -1112,11 +1146,13 @@ async function saveSettings() {
 }
 
 // ── Audio ──
-function ensureAudioContext() {
+async function ensureAudioContext() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   }
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume();
+  }
   return audioCtx;
 }
 
@@ -1124,9 +1160,21 @@ function unlockAudio() {
   ensureAudioContext();
 }
 
-function playAlertSound() {
+async function playAlertSound() {
+  const customSound = localStorage.getItem('bb_alert_sound');
+  if (customSound) {
+    try {
+      const audio = new Audio(customSound);
+      audio.volume = 1;
+      await audio.play();
+    } catch (e) {
+      console.error('Audio alert failed:', e);
+    }
+    return;
+  }
+  // Fallback: synthesized chime
   try {
-    const ctx = ensureAudioContext();
+    const ctx = await ensureAudioContext();
     const notes = [
       [880,  0.0,  0.15, 0.4],
       [1046, 0.18, 0.15, 0.4],
@@ -1147,7 +1195,7 @@ function playAlertSound() {
       osc.stop(now + start + dur + 0.05);
     });
   } catch (e) {
-    console.warn('Audio alert failed:', e);
+    console.error('Audio alert failed:', e);
   }
 }
 
@@ -1171,17 +1219,23 @@ function requestNotificationPermission() {
   }
 }
 
-function sendNotification(title, body) {
-  playAlertSound();
+async function sendNotification(title, body) {
+  await playAlertSound();
   triggerVibration();
   if ('Notification' in window && Notification.permission === 'granted') {
-    new Notification(title, {
+    const opts = {
       body,
       icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🚌</text></svg>",
       requireInteraction: true,
       tag: 'bus-buddy-alert',
       renotify: true,
-    });
+    };
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.ready;
+      reg.showNotification(title, opts);
+    } else {
+      new Notification(title, opts);
+    }
   }
   showToast(`${title} - ${body}`);
 }
