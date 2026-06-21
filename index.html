@@ -839,6 +839,11 @@
         </div>
         <button class="btn btn-ghost" onclick="sendNotification('Test Alert','Audio and notifications are working!')">Test Alert Sound</button>
       </div>
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">
+        <label>Bus Stop Database</label>
+        <div style="font-size:13px;color:var(--text2);margin-top:4px;" id="busStopCacheInfo">Checking cache...</div>
+        <button class="btn btn-ghost btn-sm" onclick="refreshBusStopsCache()" style="margin-top:8px;">&#8635; Refresh bus stop database</button>
+      </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="document.getElementById('settingsModal').classList.add('hidden')">Cancel</button>
         <button class="btn" onclick="saveSettings()">Save</button>

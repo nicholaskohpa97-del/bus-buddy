@@ -72,13 +72,79 @@ async function fetchArrivals(stopCode, serviceNo) {
   return res.json();
 }
 
-async function loadBusStops() {
-  if (state.busStops) return state.busStops;
-  showToast("Loading bus stop database...");
-  const res = await fetch("/api/bus-stops");
-  const data = await res.json();
-  state.busStops = data.value || [];
-  showToast(`Loaded ${state.busStops.length} bus stops`);
+// ── Bus Stops Cache (IndexedDB) ──
+const BUS_STOPS_DB = "bb_bus_stops_db";
+const BUS_STOPS_STORE = "stops";
+const BUS_STOPS_CACHE_KEY = "all_stops";
+const BUS_STOPS_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+function openBusStopsDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(BUS_STOPS_DB, 1);
+    req.onupgradeneeded = (e) => {
+      e.target.result.createObjectStore(BUS_STOPS_STORE, { keyPath: "key" });
+    };
+    req.onsuccess = (e) => resolve(e.target.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getCachedBusStops() {
+  try {
+    const db = await openBusStopsDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(BUS_STOPS_STORE, "readonly");
+      const req = tx.objectStore(BUS_STOPS_STORE).get(BUS_STOPS_CACHE_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function setCachedBusStops(stops) {
+  try {
+    const db = await openBusStopsDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(BUS_STOPS_STORE, "readwrite");
+      tx.objectStore(BUS_STOPS_STORE).put({ key: BUS_STOPS_CACHE_KEY, stops, cachedAt: Date.now() });
+      tx.oncomplete = resolve;
+      tx.onerror = resolve;
+    });
+  } catch {
+    // non-fatal
+  }
+}
+
+async function loadBusStops(forceRefresh = false) {
+  if (state.busStops && !forceRefresh) return state.busStops;
+
+  if (!forceRefresh) {
+    const cached = await getCachedBusStops();
+    if (cached && Date.now() - cached.cachedAt < BUS_STOPS_TTL_MS) {
+      state.busStops = cached.stops;
+      return state.busStops;
+    }
+  }
+
+  showToast("Updating bus stop database...");
+  try {
+    const res = await fetch("/api/bus-stops");
+    const data = await res.json();
+    state.busStops = data.value || [];
+    showToast(`Loaded ${state.busStops.length} bus stops`);
+    await setCachedBusStops(state.busStops);
+  } catch (err) {
+    const cached = await getCachedBusStops();
+    if (cached) {
+      state.busStops = cached.stops;
+      showToast("Using offline bus stop data");
+    } else {
+      throw err;
+    }
+  }
+
   return state.busStops;
 }
 
@@ -1086,7 +1152,7 @@ function formatDist(m) {
 }
 
 // ── Settings ──
-function openSettings() {
+async function openSettings() {
   document.getElementById("apiKeyInput").value = state.apiKey;
   document.getElementById("refreshInterval").value = state.refreshSec;
   document.getElementById("reminderLead").value = state.reminderLeadMin;
@@ -1094,6 +1160,24 @@ function openSettings() {
   document.getElementById("alertSoundName").textContent = soundName || "Default chime";
   document.getElementById("clearSoundBtn").style.display = soundName ? "" : "none";
   document.getElementById("settingsModal").classList.remove("hidden");
+  const cached = await getCachedBusStops();
+  const infoEl = document.getElementById("busStopCacheInfo");
+  if (cached) {
+    const age = Date.now() - cached.cachedAt;
+    const days = Math.floor(age / 86400000);
+    const hours = Math.floor((age % 86400000) / 3600000);
+    const ageStr = days > 0 ? `${days}d ${hours}h ago` : `${hours}h ago`;
+    infoEl.textContent = `${cached.stops.length} stops cached · last updated ${ageStr}`;
+  } else {
+    infoEl.textContent = "Not cached yet";
+  }
+}
+
+async function refreshBusStopsCache() {
+  state.busStops = null;
+  document.getElementById("busStopCacheInfo").textContent = "Refreshing...";
+  await loadBusStops(true);
+  openSettings();
 }
 
 function saveAlertSound(input) {
