@@ -691,6 +691,33 @@
     .map-pin-head--fav { background: var(--yellow); }
     .map-pin-icon { transform: rotate(45deg); font-size: 11px; display: block; }
     .leaflet-popup-close-button { color: var(--text2) !important; }
+    /* Popup arrivals preview */
+    .popup-arrivals { margin: 8px 0 4px; }
+    .popup-arr-loading, .popup-arr-empty { font-size: 12px; color: var(--text2); }
+    .popup-arr-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; padding: 3px 0;
+    }
+    .popup-arr-svc { font-weight: 800; font-size: 14px; color: var(--text); }
+    .popup-arr-row .arrival-badge { padding: 3px 8px; min-width: 38px; font-size: 12px; }
+    /* Route banner */
+    .route-banner {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      margin-bottom: 10px;
+      box-shadow: var(--shadow);
+    }
+    .route-banner-info { display: flex; flex-direction: column; min-width: 0; }
+    .route-banner-info strong { font-size: 15px; color: var(--accent); }
+    .route-banner-info span {
+      font-size: 12px; color: var(--text2);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .route-banner-actions { display: flex; gap: 6px; flex-shrink: 0; }
 
     /* ── Section Divider ── */
     .section-label {
@@ -878,6 +905,7 @@
 
     <!-- MAP TAB -->
     <div id="tab-map" class="hidden">
+      <div id="routeBanner" class="route-banner hidden"></div>
       <div class="map-wrap">
         <div id="busMap"></div>
         <button class="map-locate-btn" onclick="locateOnMap()" title="Find my location">
