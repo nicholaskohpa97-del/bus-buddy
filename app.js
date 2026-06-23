@@ -31,6 +31,9 @@ const DASH_FETCH_DELAY_MS = 800;
 let map = null;
 let mapMarkers = null;
 let mapUserMarker = null;
+let routeLayer = null;
+let currentRouteService = null;
+let currentRouteDirection = null;
 
 // ── Theme ──
 const THEME_KEY = "bb_theme";
@@ -220,6 +223,102 @@ async function loadBusStops(forceRefresh = false) {
   }
 
   return state.busStops;
+}
+
+// Index bus stops by code (built lazily, reused by route drawing & lookups).
+let busStopIndex = null;
+async function getBusStopIndex() {
+  const stops = await loadBusStops();
+  if (!busStopIndex || busStopIndex.size !== stops.length) {
+    busStopIndex = new Map(stops.map((s) => [s.BusStopCode, s]));
+  }
+  return busStopIndex;
+}
+
+// ── Bus Routes Cache (IndexedDB) ──
+const BUS_ROUTES_DB = "bb_bus_routes_db";
+const BUS_ROUTES_STORE = "routes";
+const BUS_ROUTES_CACHE_KEY = "all_routes";
+const BUS_ROUTES_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+let busRoutes = null;
+
+function openBusRoutesDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(BUS_ROUTES_DB, 1);
+    req.onupgradeneeded = (e) => {
+      e.target.result.createObjectStore(BUS_ROUTES_STORE, { keyPath: "key" });
+    };
+    req.onsuccess = (e) => resolve(e.target.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getCachedBusRoutes() {
+  try {
+    const db = await openBusRoutesDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(BUS_ROUTES_STORE, "readonly");
+      const req = tx.objectStore(BUS_ROUTES_STORE).get(BUS_ROUTES_CACHE_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function setCachedBusRoutes(routes) {
+  try {
+    const db = await openBusRoutesDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(BUS_ROUTES_STORE, "readwrite");
+      tx.objectStore(BUS_ROUTES_STORE).put({ key: BUS_ROUTES_CACHE_KEY, routes, cachedAt: Date.now() });
+      tx.oncomplete = resolve;
+      tx.onerror = resolve;
+    });
+  } catch {
+    // non-fatal
+  }
+}
+
+async function loadBusRoutes(forceRefresh = false) {
+  if (busRoutes && !forceRefresh) return busRoutes;
+
+  if (!forceRefresh) {
+    const cached = await getCachedBusRoutes();
+    if (cached && Date.now() - cached.cachedAt < BUS_ROUTES_TTL_MS) {
+      busRoutes = cached.routes;
+      return busRoutes;
+    }
+  }
+
+  showToast("Loading bus route map (one-time)...");
+  const res = await fetch("/api/bus-routes");
+  if (!res.ok) throw new Error(`API error ${res.status}`);
+  const data = await res.json();
+  busRoutes = data.value || [];
+  await setCachedBusRoutes(busRoutes);
+  return busRoutes;
+}
+
+// Returns ordered stops for a service+direction: [{code, seq, stop}]
+async function getRouteStops(serviceNo, direction) {
+  const routes = await loadBusRoutes();
+  const index = await getBusStopIndex();
+  return routes
+    .filter((r) => r.ServiceNo === serviceNo && r.Direction === direction)
+    .sort((a, b) => a.StopSequence - b.StopSequence)
+    .map((r) => ({ code: r.BusStopCode, seq: r.StopSequence, stop: index.get(r.BusStopCode) }))
+    .filter((r) => r.stop && r.stop.Latitude && r.stop.Longitude);
+}
+
+// How many directions a service runs (1 or 2).
+async function getRouteDirections(serviceNo) {
+  const routes = await loadBusRoutes();
+  const dirs = new Set(
+    routes.filter((r) => r.ServiceNo === serviceNo).map((r) => r.Direction)
+  );
+  return [...dirs].sort();
 }
 
 // ── Tabs ──
@@ -459,6 +558,7 @@ function renderServiceRow(svc, stopCode) {
       <span class="service-number">${svc.no}</span>
       <div class="arrival-times">${badges}</div>
       <div class="service-actions">
+        <button class="icon-btn" onclick="event.stopPropagation();viewRoute('${svc.no}')" title="View route on map">&#128506;</button>
         <button class="icon-btn" onclick="quickDeptReminder('${stopCode}','${svc.no}')" title="Remind me">&#128276;</button>
       </div>
     </div>`;
@@ -1267,16 +1367,143 @@ async function loadMapStops() {
       marker.bindPopup(`
         <div class="popup-name">${s.Description}</div>
         <div class="popup-detail">${s.BusStopCode} &middot; ${s.RoadName}</div>
+        <div class="popup-arrivals" id="popup-arr-${s.BusStopCode}"><div class="popup-arr-loading">Loading arrivals…</div></div>
         <div class="popup-actions">
           <button class="btn btn-sm" onclick="goToStop('${s.BusStopCode}')">View Arrivals</button>
           <button class="icon-btn ${isFav ? 'active' : ''}" onclick="toggleFav('${s.BusStopCode}','${escapeHtml(s.Description)}')" title="Favourite">&#9733;</button>
         </div>
       `);
+      marker.on("popupopen", () => loadPopupArrivals(s.BusStopCode));
       mapMarkers.addLayer(marker);
     });
   } catch {
     showToast("Failed to load bus stops on map");
   }
+}
+
+// Inject a compact live-arrival preview into an open map popup.
+async function loadPopupArrivals(stopCode) {
+  const el = document.getElementById(`popup-arr-${stopCode}`);
+  if (!el) return;
+  try {
+    const data = await fetchArrivals(stopCode);
+    if (!data.Services || data.Services.length === 0) {
+      el.innerHTML = '<div class="popup-arr-empty">No services now</div>';
+      return;
+    }
+    const services = data.Services.map((svc) => ({
+      no: svc.ServiceNo,
+      next: parseBusArrival(svc.NextBus),
+    }))
+      .sort((a, b) => (a.next.min ?? 999) - (b.next.min ?? 999))
+      .slice(0, 4);
+    el.innerHTML = services
+      .map((s) => {
+        const cls = badgeClass(s.next.min);
+        const arr = s.next.arrival ? ` data-arrival="${s.next.arrival}"` : "";
+        return `<div class="popup-arr-row">
+          <span class="popup-arr-svc">${s.no}</span>
+          <span class="arrival-badge ${cls}"${arr}><span class="time-text">${badgeLabel(s.next.min)}</span></span>
+        </div>`;
+      })
+      .join("");
+  } catch {
+    el.innerHTML = '<div class="popup-arr-empty">Couldn\'t load arrivals</div>';
+  }
+}
+
+// ── Route drawing ──
+async function viewRoute(serviceNo) {
+  switchTab("map");
+  if (!map) initMap();
+  showToast(`Loading route for bus ${serviceNo}…`);
+  try {
+    const dirs = await getRouteDirections(serviceNo);
+    if (dirs.length === 0) {
+      showToast(`No route data for bus ${serviceNo}`);
+      return;
+    }
+    currentRouteService = serviceNo;
+    await drawRoute(serviceNo, dirs[0], dirs);
+  } catch {
+    showToast("Couldn't load route map");
+  }
+}
+
+async function drawRoute(serviceNo, direction, dirs) {
+  const stops = await getRouteStops(serviceNo, direction);
+  if (stops.length === 0) {
+    showToast(`No route data for bus ${serviceNo}`);
+    return;
+  }
+  currentRouteService = serviceNo;
+  currentRouteDirection = direction;
+
+  if (routeLayer) map.removeLayer(routeLayer);
+  routeLayer = L.layerGroup().addTo(map);
+
+  const latlngs = stops.map((s) => [s.stop.Latitude, s.stop.Longitude]);
+  L.polyline(latlngs, { color: "#0d9488", weight: 5, opacity: 0.75 }).addTo(routeLayer);
+
+  stops.forEach((s, i) => {
+    const isEnd = i === 0 || i === stops.length - 1;
+    L.circleMarker([s.stop.Latitude, s.stop.Longitude], {
+      radius: isEnd ? 7 : 4,
+      fillColor: isEnd ? "#f97316" : "#0d9488",
+      color: "#fff",
+      weight: 2,
+      opacity: 1,
+      fillOpacity: 1,
+    })
+      .addTo(routeLayer)
+      .bindPopup(
+        `<div class="popup-name">${s.stop.Description}</div>
+         <div class="popup-detail">Stop ${s.seq} · ${s.code}</div>
+         <div class="popup-actions"><button class="btn btn-sm" onclick="goToStop('${s.code}')">Arrivals</button></div>`
+      );
+  });
+
+  map.fitBounds(L.polyline(latlngs).getBounds(), { padding: [40, 40] });
+  showRouteBanner(serviceNo, direction, dirs, stops);
+}
+
+function showRouteBanner(serviceNo, direction, dirs, stops) {
+  const banner = document.getElementById("routeBanner");
+  if (!banner) return;
+  const origin = stops[0].stop.Description;
+  const dest = stops[stops.length - 1].stop.Description;
+  const dirToggle =
+    dirs.length > 1
+      ? `<button class="btn btn-ghost btn-sm" onclick="toggleRouteDirection()">&#8644; Reverse</button>`
+      : "";
+  banner.innerHTML = `
+    <div class="route-banner-info">
+      <strong>Bus ${serviceNo}</strong>
+      <span>${origin} → ${dest} · ${stops.length} stops</span>
+    </div>
+    <div class="route-banner-actions">
+      ${dirToggle}
+      <button class="btn btn-ghost btn-sm" onclick="clearRoute()">Clear</button>
+    </div>`;
+  banner.classList.remove("hidden");
+}
+
+async function toggleRouteDirection() {
+  if (!currentRouteService) return;
+  const dirs = await getRouteDirections(currentRouteService);
+  const other = dirs.find((d) => d !== currentRouteDirection) || dirs[0];
+  await drawRoute(currentRouteService, other, dirs);
+}
+
+function clearRoute() {
+  if (routeLayer) {
+    map.removeLayer(routeLayer);
+    routeLayer = null;
+  }
+  currentRouteService = null;
+  currentRouteDirection = null;
+  const banner = document.getElementById("routeBanner");
+  if (banner) banner.classList.add("hidden");
 }
 
 function locateOnMap() {
