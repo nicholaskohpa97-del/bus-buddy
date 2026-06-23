@@ -32,8 +32,78 @@ let map = null;
 let mapMarkers = null;
 let mapUserMarker = null;
 
+// ── Theme ──
+const THEME_KEY = "bb_theme";
+
+function applyTheme(theme) {
+  if (theme === "dark") {
+    document.documentElement.setAttribute("data-theme", "dark");
+    document.querySelector('meta[name="theme-color"]').setAttribute("content", "#1c1917");
+    const btn = document.getElementById("themeToggle");
+    if (btn) btn.textContent = "☀️";
+  } else if (theme === "light") {
+    document.documentElement.setAttribute("data-theme", "light");
+    document.querySelector('meta[name="theme-color"]').setAttribute("content", "#0d9488");
+    const btn = document.getElementById("themeToggle");
+    if (btn) btn.textContent = "🌙";
+  } else {
+    document.documentElement.removeAttribute("data-theme");
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    document.querySelector('meta[name="theme-color"]').setAttribute("content", prefersDark ? "#1c1917" : "#0d9488");
+    const btn = document.getElementById("themeToggle");
+    if (btn) btn.textContent = prefersDark ? "☀️" : "🌙";
+  }
+}
+
+function toggleTheme() {
+  const current = localStorage.getItem(THEME_KEY);
+  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const isCurrentlyDark =
+    current === "dark" || (current === null && prefersDark);
+  const next = isCurrentlyDark ? "light" : "dark";
+  localStorage.setItem(THEME_KEY, next);
+  applyTheme(next);
+}
+
+function initTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  applyTheme(saved || null);
+  // Follow OS preference changes when no manual override is set.
+  window
+    .matchMedia("(prefers-color-scheme: dark)")
+    .addEventListener("change", () => {
+      if (!localStorage.getItem(THEME_KEY)) applyTheme(null);
+    });
+}
+
+// ── PWA Install Prompt ──
+let deferredInstallPrompt = null;
+
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  if (!localStorage.getItem("bb_installDismissed")) {
+    document.getElementById("installBanner").classList.remove("hidden");
+  }
+});
+
+async function triggerInstall() {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  const { outcome } = await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  document.getElementById("installBanner").classList.add("hidden");
+  if (outcome === "accepted") showToast("Bus Buddy installed!");
+}
+
+function dismissInstall() {
+  document.getElementById("installBanner").classList.add("hidden");
+  localStorage.setItem("bb_installDismissed", "1");
+}
+
 // ── Init ──
 document.addEventListener("DOMContentLoaded", async () => {
+  initTheme();
   const keyCheck = await fetch("/api/check-key").then(r => r.json()).catch(() => ({ hasKey: false }));
   if (keyCheck.hasKey) {
     document.getElementById("apiKeyBar").classList.add("hidden");
@@ -242,8 +312,30 @@ async function searchStop() {
   startAutoRefresh(stopCode);
 }
 
+function arrivalSkeleton() {
+  return `
+    <div class="card">
+      <div class="bus-stop-header">
+        <div style="flex:1;">
+          <div class="skeleton skeleton-text-md" style="width:55%;margin-bottom:6px;"></div>
+          <div class="skeleton skeleton-text-sm" style="width:30%;"></div>
+        </div>
+      </div>
+      ${[0,1,2].map(() => `
+        <div class="skeleton-row">
+          <div class="skeleton skeleton-svc"></div>
+          <div class="skeleton-badges">
+            <div class="skeleton skeleton-badge"></div>
+            <div class="skeleton skeleton-badge"></div>
+            <div class="skeleton skeleton-badge"></div>
+          </div>
+        </div>`).join("")}
+    </div>`;
+}
+
 async function loadArrivals(stopCode) {
   const container = document.getElementById("arrivalResults");
+  container.innerHTML = arrivalSkeleton();
   try {
     const data = await fetchArrivals(stopCode);
     state.currentStop = stopCode;
@@ -294,7 +386,12 @@ async function loadArrivals(stopCode) {
         ${services.map((svc) => renderServiceRow(svc, stopCode)).join("")}
       </div>`;
   } catch (err) {
-    container.innerHTML = `<div class="card"><p style="color:var(--red);">Error: ${err.message}. Check your API key.</p></div>`;
+    container.innerHTML = `
+      <div class="error-card">
+        <div class="error-icon">⚠️</div>
+        <p>${err.message.includes("API") ? "Couldn't load arrivals. Check your API key in Settings." : "Couldn't load arrivals. Check your connection."}</p>
+        <button class="btn btn-sm" onclick="loadArrivals('${stopCode}')">Try again</button>
+      </div>`;
   }
 }
 
@@ -902,7 +999,14 @@ function renderDashFavourites() {
         <button class="btn btn-ghost btn-sm" onclick="dashLoadStop('${fav.code}')">Load</button>
       </div>
       <div class="dash-stop-arrivals" id="dash-arrivals-${fav.code}">
-        ${i < 3 ? '<div class="dash-loading">Loading arrivals...</div>' : '<div class="dash-tap-load">Tap Load to see arrivals</div>'}
+        ${i < 3 ? `<div style="padding:4px 0;">${[0,1].map(() => `
+          <div class="skeleton-row">
+            <div class="skeleton skeleton-svc" style="height:18px;"></div>
+            <div class="skeleton-badges">
+              <div class="skeleton skeleton-badge" style="height:28px;"></div>
+              <div class="skeleton skeleton-badge" style="height:28px;"></div>
+            </div>
+          </div>`).join("")}</div>` : '<div class="dash-tap-load">Tap Load to see arrivals</div>'}
       </div>
     </div>
   `).join("");
@@ -931,13 +1035,27 @@ async function dashLoadStop(stopCode) {
     return;
   }
 
-  container.innerHTML = '<div class="dash-loading">Loading...</div>';
+  container.innerHTML = `
+    <div style="padding:4px 0;">
+      ${[0,1].map(() => `
+        <div class="skeleton-row">
+          <div class="skeleton skeleton-svc" style="height:18px;"></div>
+          <div class="skeleton-badges">
+            <div class="skeleton skeleton-badge" style="height:28px;"></div>
+            <div class="skeleton skeleton-badge" style="height:28px;"></div>
+          </div>
+        </div>`).join("")}
+    </div>`;
   try {
     const data = await fetchArrivals(stopCode);
     dashArrivalCache[stopCode] = { data, timestamp: Date.now() };
     renderDashArrivals(stopCode, data);
   } catch {
-    container.innerHTML = '<div class="dash-error">Failed to load</div>';
+    container.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 0;">
+        <span style="color:var(--red);font-size:13px;">Failed to load</span>
+        <button class="btn btn-ghost btn-sm" onclick="dashLoadStop('${stopCode}')">Retry</button>
+      </div>`;
   }
 }
 

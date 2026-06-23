@@ -30,6 +30,46 @@
       --radius: 16px;
       --radius-sm: 12px;
       --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+      --skeleton-base: rgba(0,0,0,0.07);
+      --skeleton-shine: rgba(0,0,0,0.03);
+    }
+    [data-theme="dark"] {
+      --bg: #0c0a09;
+      --surface: #1c1917;
+      --surface2: #292524;
+      --border: #3f3834;
+      --text: #fafaf9;
+      --text2: #a8a29e;
+      --accent: #2dd4bf;
+      --accent2: #5eead4;
+      --accent-bg: rgba(45,212,191,0.10);
+      --green: #34d399;
+      --yellow: #fbbf24;
+      --red: #f87171;
+      --orange: #fb923c;
+      --shadow: 0 1px 3px rgba(0,0,0,0.3), 0 1px 2px rgba(0,0,0,0.2);
+      --skeleton-base: rgba(255,255,255,0.07);
+      --skeleton-shine: rgba(255,255,255,0.03);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --bg: #0c0a09;
+        --surface: #1c1917;
+        --surface2: #292524;
+        --border: #3f3834;
+        --text: #fafaf9;
+        --text2: #a8a29e;
+        --accent: #2dd4bf;
+        --accent2: #5eead4;
+        --accent-bg: rgba(45,212,191,0.10);
+        --green: #34d399;
+        --yellow: #fbbf24;
+        --red: #f87171;
+        --orange: #fb923c;
+        --shadow: 0 1px 3px rgba(0,0,0,0.3), 0 1px 2px rgba(0,0,0,0.2);
+        --skeleton-base: rgba(255,255,255,0.07);
+        --skeleton-shine: rgba(255,255,255,0.03);
+      }
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -645,6 +685,82 @@
       margin-bottom: 12px;
     }
     .section-label svg { width: 18px; height: 18px; }
+
+    /* ── Skeletons ── */
+    @keyframes shimmer {
+      0% { background-position: -400px 0; }
+      100% { background-position: 400px 0; }
+    }
+    .skeleton {
+      background: linear-gradient(90deg, var(--skeleton-base) 25%, var(--skeleton-shine) 50%, var(--skeleton-base) 75%);
+      background-size: 800px 100%;
+      animation: shimmer 1.4s infinite;
+      border-radius: 8px;
+    }
+    .skeleton-row {
+      display: flex;
+      align-items: center;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--border);
+      gap: 12px;
+    }
+    .skeleton-row:last-child { border-bottom: none; }
+    .skeleton-svc { width: 44px; height: 22px; flex-shrink: 0; }
+    .skeleton-badges { display: flex; gap: 8px; flex: 1; }
+    .skeleton-badge { width: 56px; height: 34px; border-radius: 10px; }
+    .skeleton-text-sm { height: 13px; width: 60%; }
+    .skeleton-text-md { height: 15px; width: 40%; margin-bottom: 6px; }
+
+    /* ── Error card ── */
+    .error-card {
+      background: rgba(239,68,68,0.06);
+      border: 1px solid rgba(239,68,68,0.2);
+      border-radius: var(--radius);
+      padding: 20px;
+      text-align: center;
+      margin-bottom: 12px;
+    }
+    .error-card .error-icon { font-size: 28px; margin-bottom: 10px; }
+    .error-card p { font-size: 14px; color: var(--text2); margin-bottom: 14px; }
+
+    /* ── PWA install prompt ── */
+    .install-banner {
+      background: linear-gradient(135deg, var(--accent-bg), rgba(13,148,136,0.04));
+      border: 1px solid rgba(13,148,136,0.25);
+      border-radius: var(--radius-sm);
+      padding: 14px 16px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .install-banner-text { flex: 1; }
+    .install-banner-text strong { display: block; font-size: 14px; font-weight: 700; color: var(--text); }
+    .install-banner-text span { font-size: 12px; color: var(--text2); }
+    .install-banner-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+    /* ── Dark-mode toggle ── */
+    .theme-toggle {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text2);
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+      transition: all 0.15s;
+    }
+    .theme-toggle:hover { background: var(--surface2); color: var(--text); }
+
+    /* ── Reduced motion ── */
+    @media (prefers-reduced-motion: reduce) {
+      .skeleton { animation: none; }
+      .dropoff-active .pulse { animation: none; }
+      .auto-refresh .dot { animation: none; }
+      .notification-toast { animation: none; }
+      * { transition-duration: 0.01ms !important; }
+    }
   </style>
 </head>
 <body>
@@ -654,13 +770,24 @@
       <div class="header-subtitle">Singapore bus arrivals</div>
     </div>
     <div class="header-actions">
-      <button class="icon-btn" onclick="openSettings()" title="Settings">
+      <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle dark mode" aria-label="Toggle dark mode">🌙</button>
+      <button class="icon-btn" onclick="openSettings()" title="Settings" aria-label="Settings">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
     </div>
   </header>
 
   <main>
+    <div id="installBanner" class="install-banner hidden">
+      <div class="install-banner-text">
+        <strong>Install Bus Buddy</strong>
+        <span>Get background alerts &amp; faster access</span>
+      </div>
+      <div class="install-banner-actions">
+        <button class="btn btn-sm" onclick="triggerInstall()">Install</button>
+        <button class="icon-btn" onclick="dismissInstall()" aria-label="Dismiss" style="width:28px;height:28px;font-size:12px;">&#10005;</button>
+      </div>
+    </div>
     <div id="apiKeyBar" class="api-key-bar">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
       <span>Set your LTA DataMall API key to get started.</span>
