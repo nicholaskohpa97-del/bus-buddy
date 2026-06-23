@@ -1,4 +1,4 @@
-const CACHE = "bus-buddy-v3";
+const CACHE = "bus-buddy-v4";
 const ASSETS = ["/", "/app.js", "/manifest.json"];
 
 self.addEventListener("install", (e) => {
@@ -13,6 +13,29 @@ self.addEventListener("activate", (e) => {
     )
   );
   self.clients.claim();
+});
+
+self.addEventListener("push", (e) => {
+  let payload = {};
+  try {
+    payload = e.data ? e.data.json() : {};
+  } catch {
+    payload = { title: "Bus Buddy", body: e.data ? e.data.text() : "" };
+  }
+  const title = payload.title || "Bus Buddy";
+  const opts = {
+    body: payload.body || "",
+    icon:
+      "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🚌</text></svg>",
+    badge:
+      "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🚌</text></svg>",
+    requireInteraction: true,
+    vibrate: [200, 100, 200, 100, 400],
+    tag: payload.tag || "bus-buddy-alert",
+    renotify: true,
+    data: { url: payload.url || "/" },
+  };
+  e.waitUntil(self.registration.showNotification(title, opts));
 });
 
 self.addEventListener("notificationclick", (e) => {
