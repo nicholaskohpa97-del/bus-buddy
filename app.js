@@ -16,6 +16,7 @@ let deptCheckTimer = null;
 let dropoffWatchId = null;
 let activeDropoff = null;
 let audioCtx = null;
+let wakeLock = null;
 
 // Dashboard state
 let dashFetchQueue = [];
@@ -50,6 +51,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   refreshDashboard();
   startDashAutoRefresh();
   requestNotificationPermission();
+  initPush();
   startDepartureChecker();
   document.addEventListener('click', unlockAudio, { once: true });
   document.addEventListener('touchstart', unlockAudio, { once: true });
@@ -422,6 +424,7 @@ function saveDepartureReminder() {
   document.getElementById("deptReminderModal").classList.add("hidden");
   renderDepartureReminders();
   refreshDashboard();
+  syncPushReminders();
   showToast("Departure reminder saved");
 }
 
@@ -435,6 +438,7 @@ function deleteDeptReminder(id) {
   );
   renderDepartureReminders();
   refreshDashboard();
+  syncPushReminders();
 }
 
 function toggleDeptReminder(id) {
@@ -446,6 +450,7 @@ function toggleDeptReminder(id) {
   );
   renderDepartureReminders();
   refreshDashboard();
+  syncPushReminders();
 }
 
 function renderDepartureReminders() {
@@ -612,6 +617,7 @@ function startDropoff(alertId) {
   }
 
   activeDropoff = alert;
+  requestWakeLock();
   document.getElementById("dropoffBanner").classList.remove("hidden");
   document.getElementById("dropoffDetail").textContent =
     `${alert.nickname} - Stop ${alert.stopCode} (${alert.radius}m radius)`;
@@ -650,9 +656,38 @@ function stopDropoff() {
     dropoffWatchId = null;
   }
   activeDropoff = null;
+  releaseWakeLock();
   document.getElementById("dropoffBanner").classList.add("hidden");
   renderDropoffAlerts();
   refreshDashboard();
+}
+
+async function requestWakeLock() {
+  if (!("wakeLock" in navigator)) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release", () => {
+      wakeLock = null;
+    });
+    // Re-acquire if the page is hidden then shown again while tracking.
+    document.addEventListener("visibilitychange", reacquireWakeLock);
+  } catch (e) {
+    console.error("Wake lock failed:", e);
+  }
+}
+
+async function reacquireWakeLock() {
+  if (activeDropoff && document.visibilityState === "visible" && !wakeLock) {
+    requestWakeLock();
+  }
+}
+
+function releaseWakeLock() {
+  document.removeEventListener("visibilitychange", reacquireWakeLock);
+  if (wakeLock) {
+    wakeLock.release().catch(() => {});
+    wakeLock = null;
+  }
 }
 
 function haversine(lat1, lon1, lat2, lon2) {
@@ -806,6 +841,7 @@ async function activateMode(id) {
 
   mode.active = true;
   await postModes(state.modes);
+  syncPushReminders();
   startDropoff(`mode_${mode.id}_drop`);
   renderModes();
   renderDepartureReminders();
@@ -823,6 +859,7 @@ async function deactivateMode(id) {
 
   mode.active = false;
   await postModes(state.modes);
+  syncPushReminders();
   renderModes();
   renderDepartureReminders();
   renderDropoffAlerts();
@@ -1161,6 +1198,10 @@ async function openSettings() {
   document.getElementById("alertSoundName").textContent = soundName || "Default chime";
   document.getElementById("clearSoundBtn").style.display = soundName ? "" : "none";
   document.getElementById("settingsModal").classList.remove("hidden");
+  if (!("Notification" in window) || !("PushManager" in window)) setPushStatus("unsupported");
+  else if (Notification.permission !== "granted") setPushStatus("permission");
+  else if (pushSubscription) setPushStatus("enabled");
+  else initPush();
   const cached = await getCachedBusStops();
   const infoEl = document.getElementById("busStopCacheInfo");
   if (cached) {
@@ -1299,7 +1340,10 @@ function requestNotificationPermission() {
   }
   if (Notification.permission === 'default') {
     Notification.requestPermission().then(permission => {
-      if (permission === 'granted') ensureAudioContext();
+      if (permission === 'granted') {
+        ensureAudioContext();
+        initPush();
+      }
     });
   }
 }
@@ -1323,6 +1367,112 @@ async function sendNotification(title, body) {
     }
   }
   showToast(`${title} - ${body}`);
+}
+
+// ── Web Push (background alerts) ──
+function getDeviceId() {
+  let id = localStorage.getItem("bb_deviceId");
+  if (!id) {
+    id = "d_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    localStorage.setItem("bb_deviceId", id);
+  }
+  return id;
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+let pushSubscription = null;
+
+async function initPush() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    setPushStatus("unsupported");
+    return;
+  }
+  if (Notification.permission !== "granted") {
+    setPushStatus("permission");
+    return;
+  }
+  try {
+    const { key } = await fetch("/api/vapid-public-key").then((r) => r.json());
+    if (!key) {
+      setPushStatus("unsupported");
+      return;
+    }
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(key),
+      });
+    }
+    pushSubscription = sub;
+    await syncPushReminders();
+    setPushStatus("enabled");
+  } catch (e) {
+    console.error("Push init failed:", e);
+    setPushStatus("error");
+  }
+}
+
+// Push the current departure reminders + subscription to the server so the
+// scheduled job can fire them when the app is closed.
+async function syncPushReminders() {
+  try {
+    await fetch("/api/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        deviceId: getDeviceId(),
+        subscription: pushSubscription,
+        reminders: state.departureReminders,
+      }),
+    });
+  } catch (e) {
+    console.error("Reminder sync failed:", e);
+  }
+}
+
+function setPushStatus(status) {
+  const el = document.getElementById("pushStatus");
+  if (!el) return;
+  const map = {
+    enabled: "✅ Background alerts enabled — alerts will reach you with the app closed.",
+    permission: "⚠️ Allow notifications to enable background alerts.",
+    unsupported: "❌ Background alerts not supported on this browser.",
+    error: "⚠️ Couldn't enable background alerts. Try reloading.",
+  };
+  el.textContent = map[status] || "";
+}
+
+async function testBackgroundAlert() {
+  if (Notification.permission !== "granted") {
+    showToast("Allow notifications first, then try again.");
+    requestNotificationPermission();
+    return;
+  }
+  if (!pushSubscription) await initPush();
+  showToast("Sending background alert… lock your phone to see it arrive.");
+  try {
+    const res = await fetch("/api/test-push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deviceId: getDeviceId() }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showToast("Background test failed: " + (err.error || res.status));
+    }
+  } catch (e) {
+    showToast("Background test failed: " + e.message);
+  }
 }
 
 // ── Helpers ──
