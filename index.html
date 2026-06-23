@@ -277,11 +277,29 @@
       font-weight: 700;
       min-width: 44px;
       text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.3s, color 0.3s;
     }
     .arrival-badge.arriving { background: rgba(16,185,129,0.1); color: var(--green); }
     .arrival-badge.soon { background: rgba(245,158,11,0.1); color: var(--yellow); }
     .arrival-badge.later { background: rgba(13,148,136,0.08); color: var(--accent); }
     .arrival-badge.na { background: var(--surface2); color: var(--text2); }
+    .arrival-badge .time-text { line-height: 1.1; }
+    .badge-meta {
+      font-size: 10px;
+      color: var(--text2);
+      display: block;
+      margin-top: 2px;
+      font-weight: 500;
+    }
+    .badge-meta.load-ok { color: var(--green); }
+    .badge-meta.load-busy { color: var(--yellow); }
+    .badge-meta.load-full { color: var(--red); }
+    .badge-meta .wab { font-weight: 700; }
+    /* legacy alias kept for any cached markup */
     .load-indicator {
       font-size: 10px;
       color: var(--text2);

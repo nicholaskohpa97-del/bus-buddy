@@ -123,6 +123,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   requestNotificationPermission();
   initPush();
   startDepartureChecker();
+  startArrivalTicker();
   document.addEventListener('click', unlockAudio, { once: true });
   document.addEventListener('touchstart', unlockAudio, { once: true });
 });
@@ -397,7 +398,7 @@ async function loadArrivals(stopCode) {
 
 function parseBusArrival(bus) {
   if (!bus || !bus.EstimatedArrival)
-    return { min: null, load: null, type: null };
+    return { min: null, load: null, loadCode: null, type: null, feature: null, arrival: null };
   const diff = Math.round(
     (new Date(bus.EstimatedArrival) - new Date()) / 60000
   );
@@ -406,26 +407,50 @@ function parseBusArrival(bus) {
   return {
     min: Math.max(0, diff),
     load: loadMap[bus.Load] || bus.Load,
+    loadCode: bus.Load || null,
     type: typeMap[bus.Type] || bus.Type,
+    feature: bus.Feature || null,
+    arrival: bus.EstimatedArrival,
   };
+}
+
+// ── Arrival badge helpers (shared by arrivals tab, dashboard & live ticker) ──
+function badgeClass(min) {
+  if (min === null) return "na";
+  if (min <= 1) return "arriving";
+  if (min <= 5) return "soon";
+  return "later";
+}
+
+function badgeLabel(min) {
+  if (min === null) return "-";
+  if (min <= 1) return "Arr";
+  return `${min} min`;
+}
+
+function loadClass(code) {
+  if (code === "SEA") return "load-ok";
+  if (code === "SDA") return "load-busy";
+  if (code === "LSD") return "load-full";
+  return "";
 }
 
 function renderServiceRow(svc, stopCode) {
   const badges = svc.times
     .map((t) => {
-      if (t.min === null) return '<span class="arrival-badge na">-</span>';
-      let cls = "later";
-      let label = `${t.min} min`;
-      if (t.min <= 1) {
-        cls = "arriving";
-        label = "Arr";
-      } else if (t.min <= 5) {
-        cls = "soon";
+      const cls = badgeClass(t.min);
+      if (t.min === null) {
+        return '<span class="arrival-badge na"><span class="time-text">-</span></span>';
       }
-      const loadInfo = t.load
-        ? `<span class="load-indicator">${t.load}</span>`
+      const metaParts = [];
+      if (t.feature === "WAB")
+        metaParts.push('<span class="wab" title="Wheelchair accessible">&#9855;</span>');
+      if (t.load) metaParts.push(t.load);
+      const meta = metaParts.length
+        ? `<span class="badge-meta ${loadClass(t.loadCode)}">${metaParts.join(" ")}</span>`
         : "";
-      return `<span class="arrival-badge ${cls}">${label}${loadInfo}</span>`;
+      const dataAttr = t.arrival ? ` data-arrival="${t.arrival}"` : "";
+      return `<span class="arrival-badge ${cls}"${dataAttr}><span class="time-text">${badgeLabel(t.min)}</span>${meta}</span>`;
     })
     .join("");
 
@@ -437,6 +462,26 @@ function renderServiceRow(svc, stopCode) {
         <button class="icon-btn" onclick="quickDeptReminder('${stopCode}','${svc.no}')" title="Remind me">&#128276;</button>
       </div>
     </div>`;
+}
+
+// ── Live countdown ticker ──
+let arrivalTicker = null;
+
+function startArrivalTicker() {
+  clearInterval(arrivalTicker);
+  arrivalTicker = setInterval(updateArrivalBadges, 1000);
+}
+
+function updateArrivalBadges() {
+  const badges = document.querySelectorAll(".arrival-badge[data-arrival]");
+  badges.forEach((b) => {
+    const diff = Math.round((new Date(b.dataset.arrival) - new Date()) / 60000);
+    const min = Math.max(0, diff);
+    b.classList.remove("arriving", "soon", "later");
+    b.classList.add(badgeClass(min));
+    const tt = b.querySelector(".time-text");
+    if (tt) tt.textContent = badgeLabel(min);
+  });
 }
 
 function startAutoRefresh(stopCode) {
