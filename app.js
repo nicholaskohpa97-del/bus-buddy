@@ -32,10 +32,9 @@ const DASH_FETCH_DELAY_MS = 800;
 let map = null;
 let mapMarkers = null;
 let mapUserMarker = null;
-let routeLayer = null;
-let currentRouteService = null;
-let currentRouteDirection = null;
-// Line-view (tappable bus number → stop sequence) state
+// Combined route view (tappable bus number → map + stop list) state
+let routeMap = null;
+let routeRouteLayer = null;
 let routeStopsService = null;
 let routeStopsDirection = null;
 let routeStopsAnchor = null;
@@ -568,7 +567,6 @@ function renderServiceRow(svc, stopCode) {
       <button class="service-number" onclick="event.stopPropagation();openRouteStops('${svc.no}','${stopCode}')" aria-label="View stops for bus ${svc.no}">${svc.no}</button>
       <div class="arrival-times">${badges}</div>
       <div class="service-actions">
-        <button class="icon-btn" onclick="event.stopPropagation();viewRoute('${svc.no}')" title="View route on map" aria-label="View bus ${svc.no} route on map">&#128506;</button>
         <button class="icon-btn" onclick="quickDeptReminder('${stopCode}','${svc.no}')" title="Remind me" aria-label="Set reminder for bus ${svc.no}">&#128276;</button>
       </div>
     </div>`;
@@ -1564,98 +1562,105 @@ async function loadPopupArrivals(stopCode) {
   }
 }
 
-// ── Route drawing ──
-async function viewRoute(serviceNo) {
-  switchTab("map");
-  if (!map) initMap();
-  showToast(`Loading route for bus ${serviceNo}…`);
-  try {
-    const dirs = await getRouteDirections(serviceNo);
-    if (dirs.length === 0) {
-      showToast(`No route data for bus ${serviceNo}`);
-      return;
-    }
-    currentRouteService = serviceNo;
-    await drawRoute(serviceNo, dirs[0], dirs);
-  } catch {
-    showToast("Couldn't load route map");
-  }
+// ── Combined route view: in-view map ──
+function initRouteMap() {
+  if (routeMap) return;
+  routeMap = L.map("routeMap", { zoomControl: true }).setView([1.3521, 103.8198], 12);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 19,
+  }).addTo(routeMap);
 }
 
-async function drawRoute(serviceNo, direction, dirs) {
-  const stops = await getRouteStops(serviceNo, direction);
-  if (stops.length === 0) {
-    showToast(`No route data for bus ${serviceNo}`);
-    return;
-  }
-  currentRouteService = serviceNo;
-  currentRouteDirection = direction;
+// Draw the current service's polyline + stop markers on the in-view map.
+async function drawRouteOnMap() {
+  if (!routeMap) return;
+  const stops = await getRouteStops(routeStopsService, routeStopsDirection);
+  if (stops.length === 0) return;
 
-  if (routeLayer) map.removeLayer(routeLayer);
-  routeLayer = L.layerGroup().addTo(map);
+  if (routeRouteLayer) routeMap.removeLayer(routeRouteLayer);
+  routeRouteLayer = L.layerGroup().addTo(routeMap);
 
   const latlngs = stops.map((s) => [s.stop.Latitude, s.stop.Longitude]);
-  L.polyline(latlngs, { color: "#0d9488", weight: 5, opacity: 0.75 }).addTo(routeLayer);
+  L.polyline(latlngs, { color: "#0d9488", weight: 5, opacity: 0.8 }).addTo(routeRouteLayer);
 
   stops.forEach((s, i) => {
     const isEnd = i === 0 || i === stops.length - 1;
+    const isAnchor = s.code === routeStopsAnchor;
     L.circleMarker([s.stop.Latitude, s.stop.Longitude], {
-      radius: isEnd ? 7 : 4,
-      fillColor: isEnd ? "#f97316" : "#0d9488",
+      radius: isAnchor ? 9 : isEnd ? 7 : 4,
+      fillColor: isEnd && !isAnchor ? "#f97316" : "#0d9488",
       color: "#fff",
-      weight: 2,
+      weight: isAnchor ? 4 : 2,
       opacity: 1,
       fillOpacity: 1,
     })
-      .addTo(routeLayer)
-      .bindPopup(
-        `<div class="popup-name">${s.stop.Description}</div>
-         <div class="popup-detail">Stop ${s.seq} · ${s.code}</div>
-         <div class="popup-actions"><button class="btn btn-sm" onclick="goToStop('${s.code}')">Arrivals</button></div>`
-      );
+      .addTo(routeRouteLayer)
+      .on("click", () => openRouteStopDetail(s.code));
   });
 
-  map.fitBounds(L.polyline(latlngs).getBounds(), { padding: [40, 40] });
-  showRouteBanner(serviceNo, direction, dirs, stops);
+  const sheetH = Math.round(window.innerHeight * 0.72);
+  routeMap.fitBounds(L.latLngBounds(latlngs), {
+    paddingTopLeft: [30, 80],
+    paddingBottomRight: [30, sheetH],
+  });
 }
 
-function showRouteBanner(serviceNo, direction, dirs, stops) {
-  const banner = document.getElementById("routeBanner");
-  if (!banner) return;
-  const origin = stops[0].stop.Description;
-  const dest = stops[stops.length - 1].stop.Description;
-  const dirToggle =
-    dirs.length > 1
-      ? `<button class="btn btn-ghost btn-sm" onclick="toggleRouteDirection()">&#8644; Reverse</button>`
-      : "";
-  banner.innerHTML = `
-    <div class="route-banner-info">
-      <strong>Bus ${serviceNo}</strong>
-      <span>${origin} → ${dest} · ${stops.length} stops</span>
-    </div>
-    <div class="route-banner-actions">
-      ${dirToggle}
-      <button class="btn btn-ghost btn-sm" onclick="clearRoute()">Clear</button>
-    </div>`;
-  banner.classList.remove("hidden");
+// ── Combined route view: draggable bottom sheet ──
+function setRouteSheet(stateName) {
+  const sheet = document.getElementById("routeSheet");
+  if (!sheet) return;
+  sheet.style.height = "";
+  sheet.classList.remove("route-sheet--full", "route-sheet--mid", "route-sheet--peek");
+  sheet.classList.add(`route-sheet--${stateName}`);
 }
 
-async function toggleRouteDirection() {
-  if (!currentRouteService) return;
-  const dirs = await getRouteDirections(currentRouteService);
-  const other = dirs.find((d) => d !== currentRouteDirection) || dirs[0];
-  await drawRoute(currentRouteService, other, dirs);
+let routeSheetDragReady = false;
+function initRouteSheetDrag() {
+  if (routeSheetDragReady) return;
+  const handle = document.getElementById("routeSheetHandle");
+  const sheet = document.getElementById("routeSheet");
+  if (!handle || !sheet) return;
+  routeSheetDragReady = true;
+
+  let startY = 0, startH = 0, dragging = false;
+  const snaps = () => ({
+    peek: Math.round(window.innerHeight * 0.24),
+    mid: Math.round(window.innerHeight * 0.45),
+    full: Math.round(window.innerHeight * 0.72),
+  });
+
+  handle.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    startY = e.clientY;
+    startH = sheet.getBoundingClientRect().height;
+    sheet.classList.add("route-sheet--dragging");
+    handle.setPointerCapture(e.pointerId);
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const h = startH - (e.clientY - startY);
+    const min = Math.round(window.innerHeight * 0.15);
+    const max = Math.round(window.innerHeight * 0.85);
+    sheet.style.height = Math.max(min, Math.min(max, h)) + "px";
+  });
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    sheet.classList.remove("route-sheet--dragging");
+    const h = sheet.getBoundingClientRect().height;
+    const s = snaps();
+    const nearest = Object.keys(s).reduce((a, b) =>
+      Math.abs(s[b] - h) < Math.abs(s[a] - h) ? b : a
+    );
+    setRouteSheet(nearest);
+  };
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", end);
 }
 
-function clearRoute() {
-  if (routeLayer) {
-    map.removeLayer(routeLayer);
-    routeLayer = null;
-  }
-  currentRouteService = null;
-  currentRouteDirection = null;
-  const banner = document.getElementById("routeBanner");
-  if (banner) banner.classList.add("hidden");
+function closeRouteStops() {
+  document.getElementById("routeStopsModal").classList.add("hidden");
 }
 
 // ── Line view (tap a bus number → scrollable stop sequence) ──
@@ -1680,10 +1685,18 @@ async function openRouteStops(serviceNo, anchorCode) {
     routeStopsDirection = direction;
     routeStopsAnchor = anchorCode;
 
-    await renderRouteStopsList();
     document.getElementById("routeStopDetail").classList.add("hidden");
     document.getElementById("routeStopsListView").classList.remove("hidden");
+    setRouteSheet("full");
     document.getElementById("routeStopsModal").classList.remove("hidden");
+
+    await renderRouteStopsList();
+    initRouteMap();
+    initRouteSheetDrag();
+    setTimeout(() => {
+      if (routeMap) routeMap.invalidateSize();
+      drawRouteOnMap();
+    }, 60);
   } catch {
     showToast("Couldn't load route");
   }
@@ -1739,6 +1752,7 @@ async function toggleRouteStopsDirection() {
   routeStopsDirection =
     dirs.find((d) => d !== routeStopsDirection) ?? routeStopsDirection;
   await renderRouteStopsList();
+  await drawRouteOnMap();
 }
 
 function backToRouteStops() {
@@ -1749,32 +1763,17 @@ function backToRouteStops() {
 async function openRouteStopDetail(code) {
   document.getElementById("routeStopsListView").classList.add("hidden");
   document.getElementById("routeStopDetail").classList.remove("hidden");
+  setRouteSheet("full");
   const body = document.getElementById("routeStopDetailBody");
   const stopName = await getStopName(code);
-
-  // Complete list of services that serve this stop (from the route table).
-  let allServices = [];
-  try {
-    const routes = await loadBusRoutes();
-    allServices = [...new Set(routes.filter((r) => r.BusStopCode === code).map((r) => r.ServiceNo))]
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  } catch {}
-
-  const chips = allServices.length
-    ? `<div class="route-detail-section-label">All services here</div>
-       <div class="route-all-services">
-         ${allServices.map((no) => `<button class="route-svc-chip" onclick="openRouteStops('${no}','${code}')">${no}</button>`).join("")}
-       </div>`
-    : "";
 
   body.innerHTML = `
     <div class="route-detail-name">${escapeHtml(stopName)}</div>
     <div class="route-detail-code">${code}</div>
     <div class="route-detail-section-label">Live arrivals</div>
     <div id="routeStopDetailArrivals">${arrivalSkeleton()}</div>
-    ${chips}
     <div class="modal-actions">
-      <button class="btn btn-ghost" onclick="document.getElementById('routeStopsModal').classList.add('hidden');goToStop('${code}')">Full arrivals ↗</button>
+      <button class="btn btn-ghost" onclick="closeRouteStops();goToStop('${code}')">Full arrivals ↗</button>
     </div>`;
 
   // Load live arrivals into the detail view, reusing the arrivals renderer.
@@ -2343,12 +2342,16 @@ function focusFirstInput(modalId) {
   }, 50);
 }
 
-// Close any open modal with the Escape key.
+// Close any open modal (or the combined route view) with the Escape key.
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   document.querySelectorAll(".modal-overlay:not(.hidden)").forEach((m) => {
     m.classList.add("hidden");
   });
+  const routeView = document.getElementById("routeStopsModal");
+  if (routeView && !routeView.classList.contains("hidden")) {
+    routeView.classList.add("hidden");
+  }
 });
 
 function showToast(msg) {
