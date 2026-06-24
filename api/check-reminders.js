@@ -73,6 +73,7 @@ module.exports = async (req, res) => {
   // Singapore is fixed UTC+8 (no DST).
   const sgt = new Date(Date.now() + 8 * 3600 * 1000);
   const nowMins = sgt.getUTCHours() * 60 + sgt.getUTCMinutes();
+  const todayDow = sgt.getUTCDay(); // 0=Sun … 6=Sat, in SGT
   const now = Date.now();
 
   let rows;
@@ -98,6 +99,9 @@ module.exports = async (req, res) => {
     for (const r of reminders) {
       if (!r.enabled) continue;
       if (!r.time) continue;
+      // Recurring reminders: days[] holds 0–6 (Sun–Sat). Empty/absent = every day.
+      if (Array.isArray(r.days) && r.days.length && !r.days.includes(todayDow))
+        continue;
       const [h, m] = r.time.split(":").map(Number);
       const targetMins = h * 60 + m;
       if (nowMins < targetMins - 30 || nowMins > targetMins + 10) continue;
