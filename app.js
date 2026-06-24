@@ -122,6 +122,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("apiKeyInput").value = state.apiKey;
   document.getElementById("refreshInterval").value = state.refreshSec;
   document.getElementById("reminderLead").value = state.reminderLeadMin;
+  document
+    .querySelectorAll("[data-stop-autocomplete]")
+    .forEach(attachStopAutocomplete);
   renderFavourites();
   renderDepartureReminders();
   renderDropoffAlerts();
@@ -395,6 +398,21 @@ function switchTab(tab) {
 }
 
 // ── Search ──
+// Shared matcher: filter bus stops by name / road / code.
+async function searchStops(query, limit = 20) {
+  const q = (query || "").trim().toLowerCase();
+  if (!q) return [];
+  const stops = await loadBusStops();
+  return stops
+    .filter(
+      (s) =>
+        s.Description.toLowerCase().includes(q) ||
+        s.RoadName.toLowerCase().includes(q) ||
+        s.BusStopCode.includes(q)
+    )
+    .slice(0, limit);
+}
+
 let searchDebounce = null;
 async function handleSearch(val) {
   clearTimeout(searchDebounce);
@@ -409,16 +427,7 @@ async function handleSearch(val) {
   }
   searchDebounce = setTimeout(async () => {
     try {
-      const stops = await loadBusStops();
-      const q = val.toLowerCase();
-      const matches = stops
-        .filter(
-          (s) =>
-            s.Description.toLowerCase().includes(q) ||
-            s.RoadName.toLowerCase().includes(q) ||
-            s.BusStopCode.includes(q)
-        )
-        .slice(0, 20);
+      const matches = await searchStops(val, 20);
       if (matches.length === 0) {
         container.innerHTML =
           '<div class="search-result-item"><span class="search-result-detail">No stops found</span></div>';
@@ -445,6 +454,128 @@ function selectStop(code) {
   document.getElementById("searchResults").classList.add("hidden");
   document.getElementById("nearbyResults").classList.add("hidden");
   searchStop();
+}
+
+// ── Reusable stop autocomplete (attached to any bus-stop input) ──
+let stopAcId = 0;
+function attachStopAutocomplete(input) {
+  if (!input || input.dataset.acReady) return;
+  input.dataset.acReady = "1";
+
+  // Wrap the input so the dropdown can be absolutely positioned under it.
+  const wrap = document.createElement("div");
+  wrap.className = "stop-ac-wrap";
+  input.parentNode.insertBefore(wrap, input);
+  wrap.appendChild(input);
+
+  const list = document.createElement("div");
+  list.className = "stop-suggest hidden";
+  list.id = `stopAc${++stopAcId}`;
+  list.setAttribute("role", "listbox");
+  wrap.appendChild(list);
+
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-autocomplete", "list");
+  input.setAttribute("aria-expanded", "false");
+  input.setAttribute("aria-controls", list.id);
+  input.setAttribute("autocomplete", "off");
+
+  let matches = [];
+  let active = -1;
+  let debounce = null;
+
+  const close = () => {
+    list.classList.add("hidden");
+    list.innerHTML = "";
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    active = -1;
+  };
+
+  const choose = (i) => {
+    const s = matches[i];
+    if (!s) return;
+    input.value = s.BusStopCode;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    close();
+    input.focus();
+  };
+
+  const highlight = (i) => {
+    active = i;
+    [...list.children].forEach((el, idx) => {
+      const on = idx === active;
+      el.classList.toggle("active", on);
+      if (on) {
+        input.setAttribute("aria-activedescendant", el.id);
+        el.scrollIntoView({ block: "nearest" });
+      }
+    });
+  };
+
+  const render = () => {
+    if (matches.length === 0) {
+      list.innerHTML =
+        '<div class="search-result-item"><span class="search-result-detail">No stops found</span></div>';
+    } else {
+      list.innerHTML = matches
+        .map(
+          (s, i) => `
+        <div class="search-result-item" role="option" id="${list.id}-o${i}" data-i="${i}">
+          <div class="search-result-name">${escapeHtml(s.Description)}</div>
+          <div class="search-result-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
+        </div>`
+        )
+        .join("");
+      [...list.querySelectorAll("[data-i]")].forEach((el) => {
+        el.addEventListener("mousedown", (e) => {
+          e.preventDefault(); // keep focus, beat blur
+          choose(parseInt(el.dataset.i));
+        });
+      });
+    }
+    list.classList.remove("hidden");
+    input.setAttribute("aria-expanded", "true");
+    active = -1;
+  };
+
+  input.addEventListener("input", () => {
+    clearTimeout(debounce);
+    const val = input.value.trim();
+    if (val.length < 2 || /^\d{5}$/.test(val)) {
+      close();
+      return;
+    }
+    debounce = setTimeout(async () => {
+      try {
+        matches = await searchStops(val, 8);
+        render();
+      } catch {
+        close();
+      }
+    }, 250);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (list.classList.contains("hidden") || matches.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      highlight((active + 1) % matches.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      highlight((active - 1 + matches.length) % matches.length);
+    } else if (e.key === "Enter") {
+      if (active >= 0) {
+        e.preventDefault();
+        choose(active);
+      }
+    } else if (e.key === "Escape") {
+      close();
+    }
+  });
+
+  input.addEventListener("blur", () => setTimeout(close, 150));
 }
 
 async function searchStop() {

@@ -723,6 +723,21 @@
     .search-result-item:last-child { border-bottom: none; }
     .search-result-name { font-weight: 600; font-size: 14px; }
     .search-result-detail { font-size: 12px; color: var(--text2); margin-top: 2px; }
+    /* reusable stop autocomplete (attached to bus-stop inputs) */
+    .stop-ac-wrap { position: relative; }
+    .stop-suggest {
+      position: absolute;
+      left: 0; right: 0; top: 100%;
+      margin-top: 4px;
+      z-index: 50;
+      max-height: 240px;
+      overflow-y: auto;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+    }
+    .stop-suggest .search-result-item.active { background: var(--surface2); }
 
     /* ── Nearby Stops ── */
     .nearby-card {
@@ -1352,7 +1367,7 @@
     <div class="modal" onclick="event.stopPropagation()">
       <h3 id="deptTitle">Add Departure Reminder</h3>
       <label for="deptStop">Bus Stop Code</label>
-      <input type="text" id="deptStop" placeholder="e.g. 83139">
+      <input type="text" id="deptStop" placeholder="Search stop name or code" data-stop-autocomplete autocomplete="off">
       <label for="deptService">Bus Service Number</label>
       <input type="text" id="deptService" placeholder="e.g. 14">
       <label for="deptTime">Typical leave time</label>
@@ -1379,7 +1394,7 @@
       <input type="text" id="modeNameInput" placeholder="e.g. Going home from the office">
       <p class="modal-section-divider">Departure</p>
       <label for="modeDeptStop">Bus Stop Code</label>
-      <input type="text" id="modeDeptStop" placeholder="e.g. 83139">
+      <input type="text" id="modeDeptStop" placeholder="Search stop name or code" data-stop-autocomplete autocomplete="off">
       <label for="modeDeptService">Bus Service Number</label>
       <input type="text" id="modeDeptService" placeholder="e.g. 14">
       <label for="modeLeaveTime">Leave by</label>
@@ -1388,7 +1403,7 @@
       <input type="number" id="modeLeadMin" value="5" min="1" max="30">
       <p class="modal-section-divider">Drop-off</p>
       <label for="modeDropoffStop">Destination Stop Code</label>
-      <input type="text" id="modeDropoffStop" placeholder="e.g. 44009">
+      <input type="text" id="modeDropoffStop" placeholder="Search stop name or code" data-stop-autocomplete autocomplete="off">
       <label for="modeDropoffRadius">Alert radius (meters)</label>
       <input type="number" id="modeDropoffRadius" value="300" min="100" max="1000" step="50">
       <div class="modal-actions">
@@ -1403,7 +1418,7 @@
     <div class="modal" onclick="event.stopPropagation()">
       <h3 id="dropoffTitle">Add Drop-off Alert</h3>
       <label for="dropoffStopCode">Destination Bus Stop Code</label>
-      <input type="text" id="dropoffStopCode" placeholder="e.g. 44009">
+      <input type="text" id="dropoffStopCode" placeholder="Search stop name or code" data-stop-autocomplete autocomplete="off">
       <label for="dropoffRadius">Alert radius (meters)</label>
       <input type="number" id="dropoffRadius" value="300" min="100" max="1000" step="50">
       <label for="dropoffNickname">Nickname (optional)</label>
@@ -1420,7 +1435,7 @@
     <div class="modal" onclick="event.stopPropagation()">
       <h3 id="placeModalTitle">Set Place</h3>
       <label for="placeStopInput">Bus stop code or name</label>
-      <input type="text" id="placeStopInput" placeholder="e.g. 83139 or Opp Blk 22">
+      <input type="text" id="placeStopInput" placeholder="Search stop name or code" data-stop-autocomplete autocomplete="off">
       <p style="font-size:12px;color:var(--text2);margin-top:6px;">Tap the shortcut on Home to jump straight to this stop's arrivals.</p>
       <div class="modal-actions">
         <button id="placeRemoveBtn" class="btn btn-ghost btn-danger-text" onclick="removePlace()" style="margin-right:auto;display:none;">Remove</button>
@@ -1464,9 +1479,9 @@
         <h3>Set Home &amp; Work</h3>
         <p>Add your two most-used stops for one-tap arrivals on the Home screen. You can always do this later.</p>
         <label for="onbHomeInput">🏠 Home stop (code or name)</label>
-        <input type="text" id="onbHomeInput" placeholder="e.g. 83139">
+        <input type="text" id="onbHomeInput" placeholder="Search stop name or code" data-stop-autocomplete autocomplete="off">
         <label for="onbWorkInput">💼 Work stop (code or name)</label>
-        <input type="text" id="onbWorkInput" placeholder="e.g. 44009">
+        <input type="text" id="onbWorkInput" placeholder="Search stop name or code" data-stop-autocomplete autocomplete="off">
         <div class="modal-actions">
           <button class="btn btn-ghost" onclick="finishOnboarding()">Skip</button>
           <button class="btn" onclick="onboardingSavePlaces()">Finish</button>
