@@ -52,7 +52,8 @@ module.exports = async (req, res) => {
 
   if (req.method === "POST") {
     try {
-      const { deviceId, subscription, reminders } = req.body || {};
+      const { deviceId, subscription, reminders, favourites, places } =
+        req.body || {};
       if (!deviceId) return res.status(400).json({ error: "deviceId required" });
 
       const existing = (await getSub(deviceId)) || {};
@@ -61,6 +62,13 @@ module.exports = async (req, res) => {
         reminders: Array.isArray(reminders)
           ? reminders
           : existing.reminders || [],
+        favourites: Array.isArray(favourites)
+          ? favourites
+          : existing.favourites || [],
+        places:
+          places && typeof places === "object"
+            ? places
+            : existing.places || {},
         notifyState: existing.notifyState || {},
       };
       await upsertSub(deviceId, data);

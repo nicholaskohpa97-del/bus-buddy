@@ -7,6 +7,7 @@ let state = {
   departureReminders: JSON.parse(localStorage.getItem("bb_deptReminders") || "[]"),
   dropoffAlerts: JSON.parse(localStorage.getItem("bb_dropoffAlerts") || "[]"),
   modes: JSON.parse(localStorage.getItem("bb_modes") || "[]"),
+  places: JSON.parse(localStorage.getItem("bb_places") || "{}"),
   busStops: null,
   currentStop: null,
 };
@@ -120,13 +121,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderFavourites();
   renderDepartureReminders();
   renderDropoffAlerts();
+  renderPlaces();
   loadModes();
   refreshDashboard();
   startDashAutoRefresh();
   requestNotificationPermission();
   initPush();
+  restorePrefs();
   startDepartureChecker();
   startArrivalTicker();
+  maybeShowOnboarding();
   document.addEventListener('click', unlockAudio, { once: true });
   document.addEventListener('touchstart', unlockAudio, { once: true });
 });
@@ -324,7 +328,9 @@ async function getRouteDirections(serviceNo) {
 // ── Tabs ──
 function switchTab(tab) {
   document.querySelectorAll(".tab").forEach((t) => {
-    t.classList.toggle("active", t.dataset.tab === tab);
+    const isActive = t.dataset.tab === tab;
+    t.classList.toggle("active", isActive);
+    t.setAttribute("aria-selected", isActive ? "true" : "false");
   });
   ["dashboard", "arrivals", "map", "favourites", "reminders"].forEach((t) => {
     document.getElementById(`tab-${t}`).classList.toggle("hidden", t !== tab);
@@ -558,8 +564,8 @@ function renderServiceRow(svc, stopCode) {
       <span class="service-number">${svc.no}</span>
       <div class="arrival-times">${badges}</div>
       <div class="service-actions">
-        <button class="icon-btn" onclick="event.stopPropagation();viewRoute('${svc.no}')" title="View route on map">&#128506;</button>
-        <button class="icon-btn" onclick="quickDeptReminder('${stopCode}','${svc.no}')" title="Remind me">&#128276;</button>
+        <button class="icon-btn" onclick="event.stopPropagation();viewRoute('${svc.no}')" title="View route on map" aria-label="View bus ${svc.no} route on map">&#128506;</button>
+        <button class="icon-btn" onclick="quickDeptReminder('${stopCode}','${svc.no}')" title="Remind me" aria-label="Set reminder for bus ${svc.no}">&#128276;</button>
       </div>
     </div>`;
 }
@@ -605,6 +611,7 @@ function toggleFav(code, name) {
   localStorage.setItem("bb_favourites", JSON.stringify(state.favourites));
   renderFavourites();
   refreshDashboard();
+  syncPrefs();
   if (state.currentStop === code) loadArrivals(code);
 }
 
@@ -637,9 +644,142 @@ function goToStop(code) {
   searchStop();
 }
 
+// ── Places (Home / Work shortcuts) ──
+const PLACE_META = {
+  home: { icon: "🏠", label: "Home" },
+  work: { icon: "💼", label: "Work" },
+};
+
+function renderPlaces() {
+  const container = document.getElementById("dashPlaces");
+  if (!container) return;
+  container.innerHTML = ["home", "work"]
+    .map((key) => {
+      const meta = PLACE_META[key];
+      const place = state.places[key];
+      if (place && place.code) {
+        return `
+          <button class="place-chip place-chip--set" onclick="goToStop('${place.code}')"
+                  aria-label="${meta.label}: ${escapeHtml(place.name)}, view arrivals">
+            <span class="place-chip-icon" aria-hidden="true">${meta.icon}</span>
+            <span class="place-chip-body">
+              <span class="place-chip-label">${meta.label}</span>
+              <span class="place-chip-name">${place.name}</span>
+            </span>
+            <span class="place-chip-edit" onclick="event.stopPropagation();openPlaceModal('${key}')"
+                  role="button" aria-label="Edit ${meta.label}" title="Edit">✎</span>
+          </button>`;
+      }
+      return `
+        <button class="place-chip place-chip--empty" onclick="openPlaceModal('${key}')"
+                aria-label="Set ${meta.label} stop">
+          <span class="place-chip-icon" aria-hidden="true">${meta.icon}</span>
+          <span class="place-chip-body">
+            <span class="place-chip-label">${meta.label}</span>
+            <span class="place-chip-name place-chip-set">Set ${meta.label}</span>
+          </span>
+          <span class="place-chip-add" aria-hidden="true">+</span>
+        </button>`;
+    })
+    .join("");
+}
+
+let editingPlaceKey = null;
+
+async function openPlaceModal(key) {
+  editingPlaceKey = key;
+  const meta = PLACE_META[key];
+  document.getElementById("placeModalTitle").textContent = `Set ${meta.label}`;
+  const existing = state.places[key];
+  document.getElementById("placeStopInput").value = existing?.code || "";
+  document.getElementById("placeModal").classList.remove("hidden");
+  const removeBtn = document.getElementById("placeRemoveBtn");
+  removeBtn.style.display = existing?.code ? "" : "none";
+  focusFirstInput("placeModal");
+}
+
+async function savePlace() {
+  if (!editingPlaceKey) return;
+  const input = document.getElementById("placeStopInput").value.trim();
+  if (!input) {
+    showToast("Enter a bus stop code or name");
+    return;
+  }
+  let code = input;
+  if (!/^\d{5}$/.test(input)) {
+    const stops = await loadBusStops();
+    const match = stops.find(
+      (s) => s.Description.toLowerCase() === input.toLowerCase()
+    );
+    if (match) code = match.BusStopCode;
+  }
+  const name = await getStopName(code);
+  state.places[editingPlaceKey] = { code, name };
+  localStorage.setItem("bb_places", JSON.stringify(state.places));
+  document.getElementById("placeModal").classList.add("hidden");
+  renderPlaces();
+  syncPrefs();
+  showToast(`${PLACE_META[editingPlaceKey].label} set to ${name}`);
+}
+
+function removePlace() {
+  if (!editingPlaceKey) return;
+  delete state.places[editingPlaceKey];
+  localStorage.setItem("bb_places", JSON.stringify(state.places));
+  document.getElementById("placeModal").classList.add("hidden");
+  renderPlaces();
+  syncPrefs();
+}
+
 // ── Departure Reminders ──
+const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const DAY_SHORT = ["S", "M", "T", "W", "T", "F", "S"];
+
+// Render the 7 day-toggle buttons into a container. selected = array of 0–6.
+function renderDayPicker(containerId, selected) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const sel = new Set(selected || []);
+  el.innerHTML = DAY_SHORT.map(
+    (d, i) =>
+      `<button type="button" class="day-toggle${sel.has(i) ? " active" : ""}" data-day="${i}"
+        aria-label="${DAY_LABELS[i]}" aria-pressed="${sel.has(i)}"
+        onclick="toggleDay(this)">${d}</button>`
+  ).join("");
+}
+
+function toggleDay(btn) {
+  const on = btn.classList.toggle("active");
+  btn.setAttribute("aria-pressed", on ? "true" : "false");
+}
+
+// Returns selected days as [0–6]; empty array means "every day".
+function readDayPicker(containerId) {
+  const el = document.getElementById(containerId);
+  if (!el) return [];
+  return [...el.querySelectorAll(".day-toggle.active")].map((b) =>
+    parseInt(b.dataset.day)
+  );
+}
+
+// Human-readable summary of a reminder's day set.
+function daysSummary(days) {
+  if (!days || days.length === 0 || days.length === 7) return "Every day";
+  const set = new Set(days);
+  const weekdays = [1, 2, 3, 4, 5];
+  const weekend = [0, 6];
+  if (weekdays.every((d) => set.has(d)) && set.size === 5) return "Weekdays";
+  if (weekend.every((d) => set.has(d)) && set.size === 2) return "Weekends";
+  return [...days]
+    .sort((a, b) => a - b)
+    .map((d) => DAY_LABELS[d])
+    .join(", ");
+}
+
 function openDepartureReminderModal() {
+  renderDayPicker("deptDays", [1, 2, 3, 4, 5]); // default weekdays
   document.getElementById("deptReminderModal").classList.remove("hidden");
+  focusFirstInput("deptReminderModal");
 }
 
 function saveDepartureReminder() {
@@ -652,6 +792,7 @@ function saveDepartureReminder() {
     nickname:
       document.getElementById("deptNickname").value.trim() ||
       `Bus ${document.getElementById("deptService").value.trim()} @ ${document.getElementById("deptStop").value.trim()}`,
+    days: readDayPicker("deptDays"),
     enabled: true,
   };
   if (!reminder.stop || !reminder.service) {
@@ -710,10 +851,11 @@ function renderDepartureReminders() {
       <div class="reminder-info">
         <span class="reminder-value">${r.nickname}</span>
         <span class="reminder-label">Bus ${r.service} @ stop ${r.stop} &middot; Leave by ${r.time} &middot; Alert ${r.leadMin}min before</span>
+        <span class="reminder-label reminder-days">&#128197; ${daysSummary(r.days)}</span>
       </div>
       <div style="display:flex;gap:4px;">
-        <button class="icon-btn ${r.enabled ? "active" : ""}" onclick="toggleDeptReminder('${r.id}')" title="Toggle">${r.enabled ? "&#9654;" : "&#9724;"}</button>
-        <button class="icon-btn" onclick="deleteDeptReminder('${r.id}')" title="Delete">&#10005;</button>
+        <button class="icon-btn ${r.enabled ? "active" : ""}" onclick="toggleDeptReminder('${r.id}')" title="Toggle" aria-label="${r.enabled ? "Disable" : "Enable"} reminder">${r.enabled ? "&#9654;" : "&#9724;"}</button>
+        <button class="icon-btn" onclick="deleteDeptReminder('${r.id}')" title="Delete" aria-label="Delete reminder">&#10005;</button>
       </div>
     </div>`
     )
@@ -738,8 +880,11 @@ async function checkDepartureReminders() {
   const now = new Date();
   const nowMins = now.getHours() * 60 + now.getMinutes();
 
+  const todayDow = now.getDay();
   for (const r of state.departureReminders) {
     if (!r.enabled) continue;
+    if (Array.isArray(r.days) && r.days.length && !r.days.includes(todayDow))
+      continue;
     const [h, m] = r.time.split(":").map(Number);
     const targetMins = h * 60 + m;
     const windowStart = targetMins - 30;
@@ -765,6 +910,7 @@ async function checkDepartureReminders() {
 // ── Drop-off Alerts ──
 function openDropoffModal() {
   document.getElementById("dropoffModal").classList.remove("hidden");
+  focusFirstInput("dropoffModal");
 }
 
 function saveDropoffAlert() {
@@ -968,6 +1114,7 @@ async function loadModes() {
 
 function openModeModal() {
   document.getElementById("modeModal").classList.remove("hidden");
+  focusFirstInput("modeModal");
 }
 
 async function saveMode() {
@@ -1117,6 +1264,7 @@ async function deleteMode(id) {
 
 // ── Dashboard ──
 function refreshDashboard() {
+  renderPlaces();
   renderDashFavourites();
   renderDashReminders();
   renderDashDropoffs();
@@ -1581,6 +1729,8 @@ function formatDist(m) {
 
 // ── Settings ──
 async function openSettings() {
+  const langSel = document.getElementById("langSelect");
+  if (langSel && typeof currentLang !== "undefined") langSel.value = currentLang;
   document.getElementById("apiKeyInput").value = state.apiKey;
   document.getElementById("refreshInterval").value = state.refreshSec;
   document.getElementById("reminderLead").value = state.reminderLeadMin;
@@ -1813,7 +1963,8 @@ async function initPush() {
 }
 
 // Push the current departure reminders + subscription to the server so the
-// scheduled job can fire them when the app is closed.
+// scheduled job can fire them when the app is closed. Also carries favourites
+// and places so they sync across the user's devices.
 async function syncPushReminders() {
   try {
     await fetch("/api/push", {
@@ -1823,10 +1974,82 @@ async function syncPushReminders() {
         deviceId: getDeviceId(),
         subscription: pushSubscription,
         reminders: state.departureReminders,
+        favourites: state.favourites,
+        places: state.places,
       }),
     });
   } catch (e) {
     console.error("Reminder sync failed:", e);
+  }
+}
+
+// Lighter sync for favourites/places changes that don't need a subscription.
+async function syncPrefs() {
+  try {
+    await fetch("/api/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        deviceId: getDeviceId(),
+        favourites: state.favourites,
+        places: state.places,
+        reminders: state.departureReminders,
+      }),
+    });
+  } catch (e) {
+    console.error("Prefs sync failed:", e);
+  }
+}
+
+// On startup, pull any server-stored prefs for this device and merge them in.
+// Cross-device sync: a device that has never set favourites locally adopts the
+// server copy; otherwise local wins (the user's most recent edits are source).
+async function restorePrefs() {
+  try {
+    const remote = await fetch(
+      `/api/push?deviceId=${encodeURIComponent(getDeviceId())}`
+    ).then((r) => r.json());
+    if (!remote || typeof remote !== "object") return;
+
+    let changed = false;
+    if (
+      state.favourites.length === 0 &&
+      Array.isArray(remote.favourites) &&
+      remote.favourites.length
+    ) {
+      state.favourites = remote.favourites;
+      localStorage.setItem("bb_favourites", JSON.stringify(state.favourites));
+      changed = true;
+    }
+    if (
+      Object.keys(state.places).length === 0 &&
+      remote.places &&
+      Object.keys(remote.places).length
+    ) {
+      state.places = remote.places;
+      localStorage.setItem("bb_places", JSON.stringify(state.places));
+      changed = true;
+    }
+    if (
+      state.departureReminders.length === 0 &&
+      Array.isArray(remote.reminders) &&
+      remote.reminders.length
+    ) {
+      state.departureReminders = remote.reminders;
+      localStorage.setItem(
+        "bb_deptReminders",
+        JSON.stringify(state.departureReminders)
+      );
+      changed = true;
+    }
+    if (changed) {
+      renderFavourites();
+      renderDepartureReminders();
+      renderPlaces();
+      refreshDashboard();
+    }
+  } catch (e) {
+    console.error("Prefs restore failed:", e);
   }
 }
 
@@ -1865,6 +2088,82 @@ async function testBackgroundAlert() {
   }
 }
 
+// ── Onboarding (first-run) ──
+let onboardingStep = 0;
+
+function maybeShowOnboarding() {
+  if (localStorage.getItem("bb_onboarded")) return;
+  onboardingStep = 0;
+  showOnboardingStep(0);
+  document.getElementById("onboardingModal").classList.remove("hidden");
+}
+
+function showOnboardingStep(step) {
+  onboardingStep = step;
+  document.querySelectorAll("#onboardingModal .onb-step").forEach((el) => {
+    el.classList.toggle("hidden", parseInt(el.dataset.step) !== step);
+  });
+  document.querySelectorAll("#onboardingModal .onb-dot").forEach((el) => {
+    el.classList.toggle("active", parseInt(el.dataset.step) <= step);
+  });
+}
+
+function onboardingNext() {
+  if (onboardingStep < 2) showOnboardingStep(onboardingStep + 1);
+  else finishOnboarding();
+}
+
+async function onboardingEnableAlerts() {
+  if ("Notification" in window && Notification.permission === "default") {
+    const perm = await Notification.requestPermission();
+    if (perm === "granted") {
+      ensureAudioContext();
+      initPush();
+      showToast("Alerts enabled");
+    }
+  } else if (Notification.permission === "granted") {
+    initPush();
+  }
+  onboardingNext();
+}
+
+async function onboardingSavePlaces() {
+  const home = document.getElementById("onbHomeInput").value.trim();
+  const work = document.getElementById("onbWorkInput").value.trim();
+  if (home) await setPlaceFromInput("home", home);
+  if (work) await setPlaceFromInput("work", work);
+  finishOnboarding();
+}
+
+// Resolve a code-or-name input into a stored place (shared by onboarding).
+async function setPlaceFromInput(key, input) {
+  let code = input;
+  if (!/^\d{5}$/.test(input)) {
+    try {
+      const stops = await loadBusStops();
+      const match = stops.find(
+        (s) => s.Description.toLowerCase() === input.toLowerCase()
+      );
+      if (match) code = match.BusStopCode;
+    } catch {}
+  }
+  const name = await getStopName(code);
+  state.places[key] = { code, name };
+  localStorage.setItem("bb_places", JSON.stringify(state.places));
+}
+
+function skipOnboarding() {
+  finishOnboarding();
+}
+
+function finishOnboarding() {
+  localStorage.setItem("bb_onboarded", "1");
+  document.getElementById("onboardingModal").classList.add("hidden");
+  renderPlaces();
+  refreshDashboard();
+  syncPrefs();
+}
+
 // ── Helpers ──
 async function getStopName(code) {
   try {
@@ -1885,6 +2184,24 @@ function closeModal(event, id) {
     document.getElementById(id).classList.add("hidden");
   }
 }
+
+// Move keyboard focus to the first field of a freshly-opened modal.
+function focusFirstInput(modalId) {
+  setTimeout(() => {
+    const modal = document.getElementById(modalId);
+    if (!modal) return;
+    const field = modal.querySelector("input, select, textarea, button");
+    if (field) field.focus();
+  }, 50);
+}
+
+// Close any open modal with the Escape key.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  document.querySelectorAll(".modal-overlay:not(.hidden)").forEach((m) => {
+    m.classList.add("hidden");
+  });
+});
 
 function showToast(msg) {
   const el = document.getElementById("toast");
