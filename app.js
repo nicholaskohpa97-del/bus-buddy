@@ -35,6 +35,7 @@ let mapUserMarker = null;
 // Combined route view (tappable bus number → map + stop list) state
 let routeMap = null;
 let routeRouteLayer = null;
+let routeSelMarker = null;
 let routeStopsService = null;
 let routeStopsDirection = null;
 let routeStopsAnchor = null;
@@ -317,6 +318,49 @@ async function getRouteStops(serviceNo, direction) {
     .sort((a, b) => a.StopSequence - b.StopSequence)
     .map((r) => ({ code: r.BusStopCode, seq: r.StopSequence, stop: index.get(r.BusStopCode) }))
     .filter((r) => r.stop && r.stop.Latitude && r.stop.Longitude);
+}
+
+// ── Stop classification: bus interchanges & MRT/LRT-connected stops ──
+// SG bus-stop Descriptions name station stops "…Stn" and interchanges "…Int".
+// We derive station locations from those, then also flag nearby stops by
+// proximity — so detection uses both naming convention and location.
+let stationAnchors = null;
+const stopClassCache = new Map();
+
+async function getStationAnchors() {
+  if (stationAnchors) return stationAnchors;
+  const stops = await loadBusStops();
+  stationAnchors = stops
+    .filter((s) => /\bstn\b/i.test(s.Description || ""))
+    .map((s) => [s.Latitude, s.Longitude]);
+  return stationAnchors;
+}
+
+// Returns { interchange, mrt } for a stop, memoized by BusStopCode.
+async function classifyStop(stop) {
+  if (!stop) return { interchange: false, mrt: false };
+  const cached = stopClassCache.get(stop.BusStopCode);
+  if (cached) return cached;
+  const desc = stop.Description || "";
+  const interchange = /\bint\b/i.test(desc);
+  let mrt = /\bstn\b/i.test(desc);
+  if (!mrt) {
+    const anchors = await getStationAnchors();
+    mrt = anchors.some(
+      ([lat, lng]) => haversine(stop.Latitude, stop.Longitude, lat, lng) <= 150
+    );
+  }
+  const result = { interchange, mrt };
+  stopClassCache.set(stop.BusStopCode, result);
+  return result;
+}
+
+// Badge markup for a classified stop (reused by list + detail).
+function stopTagsHtml(cls) {
+  let html = "";
+  if (cls.mrt) html += '<span class="route-tag route-tag-mrt">🚆 MRT</span>';
+  if (cls.interchange) html += '<span class="route-tag route-tag-int">🔁 Int</span>';
+  return html;
 }
 
 // How many directions a service runs (1 or 2).
@@ -1584,19 +1628,34 @@ async function drawRouteOnMap() {
   const latlngs = stops.map((s) => [s.stop.Latitude, s.stop.Longitude]);
   L.polyline(latlngs, { color: "#0d9488", weight: 5, opacity: 0.8 }).addTo(routeRouteLayer);
 
+  const classes = await Promise.all(stops.map((s) => classifyStop(s.stop)));
   stops.forEach((s, i) => {
+    const ll = [s.stop.Latitude, s.stop.Longitude];
     const isEnd = i === 0 || i === stops.length - 1;
     const isAnchor = s.code === routeStopsAnchor;
-    L.circleMarker([s.stop.Latitude, s.stop.Longitude], {
-      radius: isAnchor ? 9 : isEnd ? 7 : 4,
-      fillColor: isEnd && !isAnchor ? "#f97316" : "#0d9488",
-      color: "#fff",
-      weight: isAnchor ? 4 : 2,
-      opacity: 1,
-      fillOpacity: 1,
-    })
-      .addTo(routeRouteLayer)
-      .on("click", () => openRouteStopDetail(s.code));
+    const cls = classes[i];
+    let marker;
+    if (cls.mrt || cls.interchange) {
+      const emoji = cls.mrt ? "🚆" : "🔁";
+      marker = L.marker(ll, {
+        icon: L.divIcon({
+          className: "route-marker",
+          html: `<span class="route-marker-badge${cls.mrt ? " is-mrt" : " is-int"}">${emoji}</span>`,
+          iconSize: [24, 24],
+          iconAnchor: [12, 12],
+        }),
+      });
+    } else {
+      marker = L.circleMarker(ll, {
+        radius: isAnchor ? 9 : isEnd ? 7 : 4,
+        fillColor: isEnd && !isAnchor ? "#f97316" : "#0d9488",
+        color: "#fff",
+        weight: isAnchor ? 4 : 2,
+        opacity: 1,
+        fillOpacity: 1,
+      });
+    }
+    marker.addTo(routeRouteLayer).on("click", () => openRouteStopDetail(s.code));
   });
 
   const sheetH = Math.round(window.innerHeight * 0.72);
@@ -1661,6 +1720,10 @@ function initRouteSheetDrag() {
 
 function closeRouteStops() {
   document.getElementById("routeStopsModal").classList.add("hidden");
+  if (routeMap && routeSelMarker) {
+    routeMap.removeLayer(routeSelMarker);
+    routeSelMarker = null;
+  }
 }
 
 // ── Line view (tap a bus number → scrollable stop sequence) ──
@@ -1720,6 +1783,7 @@ async function renderRouteStopsList() {
   const reverseBtn = document.getElementById("routeStopsReverse");
   reverseBtn.classList.toggle("hidden", dirs.length < 2);
 
+  const tags = await Promise.all(stops.map((s) => classifyStop(s.stop)));
   const list = document.getElementById("routeStopsList");
   list.innerHTML = stops
     .map((s, i) => {
@@ -1731,7 +1795,7 @@ async function renderRouteStopsList() {
         <button class="route-stop-item ${cls}" onclick="openRouteStopDetail('${s.code}')" aria-label="${escapeHtml(s.stop.Description)}, view stop details">
           <span class="route-stop-rail"><span class="route-stop-dot"></span></span>
           <span class="route-stop-body">
-            <span class="route-stop-name">${escapeHtml(s.stop.Description)}${here}</span>
+            <span class="route-stop-name">${escapeHtml(s.stop.Description)}${here}${stopTagsHtml(tags[i])}</span>
             <span class="route-stop-meta">Stop ${s.seq} · ${s.code}${s.stop.RoadName ? " · " + escapeHtml(s.stop.RoadName) : ""}</span>
           </span>
           <span class="route-stop-chevron" aria-hidden="true">›</span>
@@ -1758,17 +1822,41 @@ async function toggleRouteStopsDirection() {
 function backToRouteStops() {
   document.getElementById("routeStopDetail").classList.add("hidden");
   document.getElementById("routeStopsListView").classList.remove("hidden");
+  setRouteSheet("full");
+  if (routeMap && routeSelMarker) {
+    routeMap.removeLayer(routeSelMarker);
+    routeSelMarker = null;
+  }
+  // Re-fit the whole route now that the sheet is back to full height.
+  drawRouteOnMap();
 }
 
 async function openRouteStopDetail(code) {
   document.getElementById("routeStopsListView").classList.add("hidden");
   document.getElementById("routeStopDetail").classList.remove("hidden");
-  setRouteSheet("full");
+  setRouteSheet("mid");
   const body = document.getElementById("routeStopDetailBody");
-  const stopName = await getStopName(code);
+  const st = (await getBusStopIndex()).get(code);
+  const stopName = st ? st.Description : await getStopName(code);
+  const cls = await classifyStop(st);
+
+  // Zoom the in-view map to the tapped stop and highlight it.
+  if (routeMap && st) {
+    if (routeSelMarker) routeMap.removeLayer(routeSelMarker);
+    routeSelMarker = L.circleMarker([st.Latitude, st.Longitude], {
+      radius: 11, fillColor: "#0d9488", color: "#fff",
+      weight: 4, opacity: 1, fillOpacity: 0.9,
+    }).addTo(routeMap);
+    setTimeout(() => {
+      routeMap.invalidateSize();
+      routeMap.setView([st.Latitude, st.Longitude], 17);
+      // Lift the stop into the strip visible above the bottom sheet.
+      routeMap.panBy([0, Math.round(window.innerHeight * 0.22)], { animate: false });
+    }, 280);
+  }
 
   body.innerHTML = `
-    <div class="route-detail-name">${escapeHtml(stopName)}</div>
+    <div class="route-detail-name">${escapeHtml(stopName)}${stopTagsHtml(cls)}</div>
     <div class="route-detail-code">${code}</div>
     <div class="route-detail-section-label">Live arrivals</div>
     <div id="routeStopDetailArrivals">${arrivalSkeleton()}</div>
