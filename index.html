@@ -462,8 +462,89 @@
       justify-content: flex-end;
     }
 
-    /* ── Route line view ── */
-    .route-stops-modal { max-width: 460px; }
+    /* ── Combined route view (map + draggable stop sheet) ── */
+    .route-view {
+      position: fixed;
+      inset: 0;
+      z-index: 400;
+      background: var(--bg);
+    }
+    .route-view.hidden { display: none; }
+    .route-view-map { position: absolute; inset: 0; z-index: 1; }
+    .route-view-topbar {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      z-index: 3;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px;
+    }
+    .route-view-title {
+      flex: 1;
+      min-width: 0;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 8px 12px;
+      box-shadow: var(--shadow);
+    }
+    .route-view-title h3 { font-size: 15px; font-weight: 700; margin: 0; color: var(--accent); }
+    .route-view-title .route-stops-sub {
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .route-view-btn {
+      flex: 0 0 auto;
+      width: 40px; height: 40px;
+      border-radius: 50%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      font-size: 16px;
+      cursor: pointer;
+      box-shadow: var(--shadow);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .route-view-btn:hover, .route-view-btn:focus-visible { color: var(--accent); outline: none; }
+    .route-sheet {
+      position: absolute;
+      left: 0; right: 0; bottom: 0;
+      z-index: 2;
+      background: var(--surface);
+      border-radius: 20px 20px 0 0;
+      box-shadow: 0 -4px 30px rgba(0,0,0,0.18);
+      display: flex;
+      flex-direction: column;
+      max-width: 480px;
+      margin: 0 auto;
+      transition: height 0.25s ease;
+      overflow: hidden;
+    }
+    .route-sheet--peek { height: 24vh; }
+    .route-sheet--mid { height: 45vh; }
+    .route-sheet--full { height: 72vh; }
+    .route-sheet--dragging { transition: none; }
+    .route-sheet-handle {
+      flex: 0 0 auto;
+      padding: 10px 0 6px;
+      cursor: grab;
+      touch-action: none;
+      display: flex;
+      justify-content: center;
+    }
+    .route-sheet-handle span {
+      display: block;
+      width: 40px; height: 5px;
+      border-radius: 3px;
+      background: var(--border);
+    }
+    .route-sheet-handle:active { cursor: grabbing; }
+    .route-sheet-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 4px 18px 20px;
+    }
     .route-stops-head {
       display: flex;
       align-items: flex-start;
@@ -475,8 +556,6 @@
     .route-stops-head-actions { display: flex; align-items: center; gap: 8px; }
     .route-stops-sub { font-size: 13px; color: var(--text2); line-height: 1.4; }
     .route-stops-list {
-      max-height: 60vh;
-      overflow-y: auto;
       margin: 0 -4px;
       padding: 0 4px;
     }
@@ -572,21 +651,6 @@
       color: var(--text2);
       margin: 16px 0 8px;
     }
-    .route-all-services { display: flex; flex-wrap: wrap; gap: 6px; }
-    .route-svc-chip {
-      font-size: 13px;
-      font-weight: 700;
-      color: var(--accent);
-      background: var(--accent-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 4px 10px;
-      cursor: pointer;
-      font-family: inherit;
-    }
-    .route-svc-chip:hover,
-    .route-svc-chip:focus-visible { border-color: var(--accent); outline: none; }
-
     /* ── Empty State ── */
     .empty-state {
       text-align: center;
@@ -840,25 +904,6 @@
     }
     .popup-arr-svc { font-weight: 800; font-size: 14px; color: var(--text); }
     .popup-arr-row .arrival-badge { padding: 3px 8px; min-width: 38px; font-size: 12px; }
-    /* Route banner */
-    .route-banner {
-      display: flex; align-items: center; justify-content: space-between;
-      gap: 10px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      padding: 10px 14px;
-      margin-bottom: 10px;
-      box-shadow: var(--shadow);
-    }
-    .route-banner-info { display: flex; flex-direction: column; min-width: 0; }
-    .route-banner-info strong { font-size: 15px; color: var(--accent); }
-    .route-banner-info span {
-      font-size: 12px; color: var(--text2);
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-    .route-banner-actions { display: flex; gap: 6px; flex-shrink: 0; }
-
     /* ── Section Divider ── */
     .section-label {
       display: flex;
@@ -1131,7 +1176,6 @@
 
     <!-- MAP TAB -->
     <div id="tab-map" class="hidden">
-      <div id="routeBanner" class="route-banner hidden"></div>
       <div class="map-wrap">
         <div id="busMap"></div>
         <button class="map-locate-btn" onclick="locateOnMap()" title="Find my location">
@@ -1388,31 +1432,34 @@
     </div>
   </div>
 
-  <!-- ROUTE STOPS (LINE VIEW) MODAL -->
-  <div id="routeStopsModal" class="modal-overlay hidden" onclick="closeModal(event, 'routeStopsModal')" role="dialog" aria-modal="true" aria-labelledby="routeStopsTitle">
-    <div class="modal route-stops-modal" onclick="event.stopPropagation()">
-      <!-- Stop sequence view -->
-      <div id="routeStopsListView">
-        <div class="route-stops-head">
-          <div>
-            <h3 id="routeStopsTitle">Route</h3>
-            <div id="routeStopsSub" class="route-stops-sub"></div>
-          </div>
-          <div class="route-stops-head-actions">
-            <button id="routeStopsReverse" class="btn btn-ghost btn-sm hidden" onclick="toggleRouteStopsDirection()">&#8644; Reverse</button>
-            <button class="icon-btn" onclick="document.getElementById('routeStopsModal').classList.add('hidden')" aria-label="Close">&#10005;</button>
-          </div>
-        </div>
-        <div id="routeStopsList" class="route-stops-list"></div>
-      </div>
+  <!-- COMBINED ROUTE VIEW (map + draggable stop list) -->
+  <div id="routeStopsModal" class="route-view hidden" role="dialog" aria-modal="true" aria-labelledby="routeStopsTitle">
+    <div id="routeMap" class="route-view-map"></div>
 
-      <!-- Single stop detail sub-view -->
-      <div id="routeStopDetail" class="hidden">
-        <div class="route-stops-head">
-          <button class="btn btn-ghost btn-sm" onclick="backToRouteStops()" aria-label="Back to route">&#8592; Back</button>
-          <button class="icon-btn" onclick="document.getElementById('routeStopsModal').classList.add('hidden')" aria-label="Close">&#10005;</button>
+    <div class="route-view-topbar">
+      <button class="route-view-btn" onclick="closeRouteStops()" aria-label="Close route view">&#10005;</button>
+      <div class="route-view-title">
+        <h3 id="routeStopsTitle">Route</h3>
+        <div id="routeStopsSub" class="route-stops-sub"></div>
+      </div>
+      <button id="routeStopsReverse" class="route-view-btn hidden" onclick="toggleRouteStopsDirection()" aria-label="Reverse direction" title="Reverse direction">&#8644;</button>
+    </div>
+
+    <div id="routeSheet" class="route-sheet route-sheet--full">
+      <div id="routeSheetHandle" class="route-sheet-handle" aria-label="Drag to resize"><span></span></div>
+      <div class="route-sheet-body">
+        <!-- Stop sequence view -->
+        <div id="routeStopsListView">
+          <div id="routeStopsList" class="route-stops-list"></div>
         </div>
-        <div id="routeStopDetailBody"></div>
+
+        <!-- Single stop detail sub-view -->
+        <div id="routeStopDetail" class="hidden">
+          <div class="route-stops-head">
+            <button class="btn btn-ghost btn-sm" onclick="backToRouteStops()" aria-label="Back to route">&#8592; Back</button>
+          </div>
+          <div id="routeStopDetailBody"></div>
+        </div>
       </div>
     </div>
   </div>
