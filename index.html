@@ -264,6 +264,21 @@
       min-width: 56px;
       color: var(--text);
       letter-spacing: -0.3px;
+      text-align: left;
+      background: none;
+      border: none;
+      padding: 4px 8px 4px 0;
+      margin: -4px 0;
+      cursor: pointer;
+      font-family: inherit;
+      border-radius: 8px;
+      transition: color 0.15s, background 0.15s;
+    }
+    button.service-number:hover,
+    button.service-number:focus-visible {
+      color: var(--accent);
+      background: var(--accent-bg);
+      outline: none;
     }
     .arrival-times {
       flex: 1;
@@ -446,6 +461,131 @@
       margin-top: 20px;
       justify-content: flex-end;
     }
+
+    /* ── Route line view ── */
+    .route-stops-modal { max-width: 460px; }
+    .route-stops-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .route-stops-head h3 { margin-bottom: 2px; }
+    .route-stops-head-actions { display: flex; align-items: center; gap: 8px; }
+    .route-stops-sub { font-size: 13px; color: var(--text2); line-height: 1.4; }
+    .route-stops-list {
+      max-height: 60vh;
+      overflow-y: auto;
+      margin: 0 -4px;
+      padding: 0 4px;
+    }
+    .route-stop-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      text-align: left;
+      background: none;
+      border: none;
+      padding: 2px 8px;
+      cursor: pointer;
+      color: var(--text);
+      font-family: inherit;
+      border-radius: 10px;
+      position: relative;
+    }
+    .route-stop-item:hover,
+    .route-stop-item:focus-visible { background: var(--surface2); outline: none; }
+    /* timeline rail */
+    .route-stop-rail {
+      position: relative;
+      width: 18px;
+      align-self: stretch;
+      flex: 0 0 18px;
+    }
+    .route-stop-rail::before {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 0; bottom: 0;
+      width: 2px;
+      margin-left: -1px;
+      background: var(--border);
+    }
+    .route-stop-item:first-child .route-stop-rail::before { top: 50%; }
+    .route-stop-item:last-child .route-stop-rail::before { bottom: 50%; }
+    .route-stop-dot {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 10px; height: 10px;
+      margin: -5px 0 0 -5px;
+      border-radius: 50%;
+      background: var(--border);
+      border: 2px solid var(--surface);
+      z-index: 1;
+    }
+    .route-stop-body { flex: 1; padding: 9px 0; min-width: 0; }
+    .route-stop-name {
+      font-size: 14px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .route-stop-meta { font-size: 12px; color: var(--text2); margin-top: 1px; }
+    /* states */
+    .route-stop-item.passed { opacity: 0.45; }
+    .route-stop-item.passed .route-stop-name { font-weight: 500; }
+    .route-stop-item.current .route-stop-dot {
+      background: var(--accent);
+      width: 14px; height: 14px;
+      margin: -7px 0 0 -7px;
+      box-shadow: 0 0 0 3px var(--accent-bg);
+    }
+    .route-stop-item.current .route-stop-name { color: var(--accent); font-weight: 800; }
+    .route-stop-item.current .route-stop-rail::before { background: var(--accent); }
+    .route-stop-item.upcoming .route-stop-dot { background: var(--accent); }
+    .route-here-badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--accent);
+      background: var(--accent-bg);
+      padding: 1px 6px;
+      border-radius: 6px;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+    .route-stop-chevron { color: var(--text2); font-size: 16px; flex: 0 0 auto; }
+    /* stop detail sub-view */
+    .route-detail-name { font-size: 18px; font-weight: 700; }
+    .route-detail-code { font-size: 13px; color: var(--text2); margin-bottom: 14px; }
+    .route-detail-section-label {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--text2);
+      margin: 16px 0 8px;
+    }
+    .route-all-services { display: flex; flex-wrap: wrap; gap: 6px; }
+    .route-svc-chip {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+      background: var(--accent-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 4px 10px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .route-svc-chip:hover,
+    .route-svc-chip:focus-visible { border-color: var(--accent); outline: none; }
 
     /* ── Empty State ── */
     .empty-state {
@@ -1244,6 +1384,35 @@
           <button class="btn btn-ghost" onclick="finishOnboarding()">Skip</button>
           <button class="btn" onclick="onboardingSavePlaces()">Finish</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROUTE STOPS (LINE VIEW) MODAL -->
+  <div id="routeStopsModal" class="modal-overlay hidden" onclick="closeModal(event, 'routeStopsModal')" role="dialog" aria-modal="true" aria-labelledby="routeStopsTitle">
+    <div class="modal route-stops-modal" onclick="event.stopPropagation()">
+      <!-- Stop sequence view -->
+      <div id="routeStopsListView">
+        <div class="route-stops-head">
+          <div>
+            <h3 id="routeStopsTitle">Route</h3>
+            <div id="routeStopsSub" class="route-stops-sub"></div>
+          </div>
+          <div class="route-stops-head-actions">
+            <button id="routeStopsReverse" class="btn btn-ghost btn-sm hidden" onclick="toggleRouteStopsDirection()">&#8644; Reverse</button>
+            <button class="icon-btn" onclick="document.getElementById('routeStopsModal').classList.add('hidden')" aria-label="Close">&#10005;</button>
+          </div>
+        </div>
+        <div id="routeStopsList" class="route-stops-list"></div>
+      </div>
+
+      <!-- Single stop detail sub-view -->
+      <div id="routeStopDetail" class="hidden">
+        <div class="route-stops-head">
+          <button class="btn btn-ghost btn-sm" onclick="backToRouteStops()" aria-label="Back to route">&#8592; Back</button>
+          <button class="icon-btn" onclick="document.getElementById('routeStopsModal').classList.add('hidden')" aria-label="Close">&#10005;</button>
+        </div>
+        <div id="routeStopDetailBody"></div>
       </div>
     </div>
   </div>

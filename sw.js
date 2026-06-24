@@ -1,4 +1,4 @@
-const CACHE = "bus-buddy-v5";
+const CACHE = "bus-buddy-v6";
 const ASSETS = ["/", "/app.js", "/i18n.js", "/manifest.json"];
 
 self.addEventListener("install", (e) => {
