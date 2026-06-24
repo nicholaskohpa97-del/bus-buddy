@@ -1,3 +1,8 @@
 {
-  "framework": null
+  "framework": null,
+  "functions": {
+    "api/check-reminders.js": {
+      "maxDuration": 30
+    }
+  }
 }
