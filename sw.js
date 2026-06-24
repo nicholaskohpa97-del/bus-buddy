@@ -1,4 +1,4 @@
-const CACHE = "bus-buddy-v9";
+const CACHE = "bus-buddy-v10";
 const ASSETS = ["/", "/app.js", "/i18n.js", "/manifest.json"];
 
 self.addEventListener("install", (e) => {
@@ -28,22 +28,32 @@ self.addEventListener("push", (e) => {
     icon:
       "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🚌</text></svg>",
     badge:
-      "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🚌</text></svg>",
+      "data:image/svg+xml,<svg xmlns='http://www.w3.org/2020/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🚌</text></svg>",
     requireInteraction: true,
     vibrate: [200, 100, 200, 100, 400],
     tag: payload.tag || "bus-buddy-alert",
     renotify: true,
     data: { url: payload.url || "/" },
   };
-  e.waitUntil(self.registration.showNotification(title, opts));
+  e.waitUntil(
+    self.registration.showNotification(title, opts).then(() =>
+      // If the app is already open, tell it to play the alert sound immediately.
+      self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
+        list.forEach((client) => client.postMessage({ type: "PLAY_ALERT" }));
+      })
+    )
+  );
 });
 
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
   e.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
-      if (list.length > 0) return list[0].focus();
-      return clients.openWindow("/");
+      const p = list.length > 0 ? list[0].focus() : clients.openWindow(e.notification.data?.url || "/");
+      // Tell the (re)focused window to play the alert sound — tap is a user gesture so audio is allowed.
+      return Promise.resolve(p).then((client) => {
+        if (client) client.postMessage({ type: "PLAY_ALERT" });
+      });
     })
   );
 });

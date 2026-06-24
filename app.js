@@ -134,6 +134,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   startDashAutoRefresh();
   requestNotificationPermission();
   initPush();
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.addEventListener("message", (e) => {
+      if (e.data?.type === "PLAY_ALERT") playAlertSound();
+    });
+  }
   restorePrefs();
   startDepartureChecker();
   startArrivalTicker();
