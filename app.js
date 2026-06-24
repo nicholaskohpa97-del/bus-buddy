@@ -35,6 +35,10 @@ let mapUserMarker = null;
 let routeLayer = null;
 let currentRouteService = null;
 let currentRouteDirection = null;
+// Line-view (tappable bus number → stop sequence) state
+let routeStopsService = null;
+let routeStopsDirection = null;
+let routeStopsAnchor = null;
 
 // ── Theme ──
 const THEME_KEY = "bb_theme";
@@ -561,7 +565,7 @@ function renderServiceRow(svc, stopCode) {
 
   return `
     <div class="service-row">
-      <span class="service-number">${svc.no}</span>
+      <button class="service-number" onclick="event.stopPropagation();openRouteStops('${svc.no}','${stopCode}')" aria-label="View stops for bus ${svc.no}">${svc.no}</button>
       <div class="arrival-times">${badges}</div>
       <div class="service-actions">
         <button class="icon-btn" onclick="event.stopPropagation();viewRoute('${svc.no}')" title="View route on map" aria-label="View bus ${svc.no} route on map">&#128506;</button>
@@ -1652,6 +1656,150 @@ function clearRoute() {
   currentRouteDirection = null;
   const banner = document.getElementById("routeBanner");
   if (banner) banner.classList.add("hidden");
+}
+
+// ── Line view (tap a bus number → scrollable stop sequence) ──
+async function openRouteStops(serviceNo, anchorCode) {
+  showToast(`Loading route for bus ${serviceNo}…`);
+  try {
+    const dirs = await getRouteDirections(serviceNo);
+    if (dirs.length === 0) {
+      showToast(`No route data for bus ${serviceNo}`);
+      return;
+    }
+    // Pick the direction that actually contains the stop we tapped from.
+    let direction = dirs[0];
+    for (const d of dirs) {
+      const stops = await getRouteStops(serviceNo, d);
+      if (stops.some((s) => s.code === anchorCode)) {
+        direction = d;
+        break;
+      }
+    }
+    routeStopsService = serviceNo;
+    routeStopsDirection = direction;
+    routeStopsAnchor = anchorCode;
+
+    await renderRouteStopsList();
+    document.getElementById("routeStopDetail").classList.add("hidden");
+    document.getElementById("routeStopsListView").classList.remove("hidden");
+    document.getElementById("routeStopsModal").classList.remove("hidden");
+  } catch {
+    showToast("Couldn't load route");
+  }
+}
+
+async function renderRouteStopsList() {
+  const dirs = await getRouteDirections(routeStopsService);
+  const stops = await getRouteStops(routeStopsService, routeStopsDirection);
+  if (stops.length === 0) {
+    showToast(`No route data for bus ${routeStopsService}`);
+    return;
+  }
+  const anchorIndex = stops.findIndex((s) => s.code === routeStopsAnchor);
+
+  document.getElementById("routeStopsTitle").textContent = `Bus ${routeStopsService}`;
+  const origin = stops[0].stop.Description;
+  const dest = stops[stops.length - 1].stop.Description;
+  document.getElementById("routeStopsSub").textContent =
+    `${origin} → ${dest} · ${stops.length} stops`;
+
+  const reverseBtn = document.getElementById("routeStopsReverse");
+  reverseBtn.classList.toggle("hidden", dirs.length < 2);
+
+  const list = document.getElementById("routeStopsList");
+  list.innerHTML = stops
+    .map((s, i) => {
+      let cls = "upcoming";
+      if (anchorIndex !== -1 && i < anchorIndex) cls = "passed";
+      else if (i === anchorIndex) cls = "current";
+      const here = i === anchorIndex ? '<span class="route-here-badge">Here</span>' : "";
+      return `
+        <button class="route-stop-item ${cls}" onclick="openRouteStopDetail('${s.code}')" aria-label="${escapeHtml(s.stop.Description)}, view stop details">
+          <span class="route-stop-rail"><span class="route-stop-dot"></span></span>
+          <span class="route-stop-body">
+            <span class="route-stop-name">${escapeHtml(s.stop.Description)}${here}</span>
+            <span class="route-stop-meta">Stop ${s.seq} · ${s.code}${s.stop.RoadName ? " · " + escapeHtml(s.stop.RoadName) : ""}</span>
+          </span>
+          <span class="route-stop-chevron" aria-hidden="true">›</span>
+        </button>`;
+    })
+    .join("");
+
+  // Bring the current stop into view.
+  requestAnimationFrame(() => {
+    const cur = list.querySelector(".route-stop-item.current");
+    if (cur) cur.scrollIntoView({ block: "center" });
+    else list.scrollTop = 0;
+  });
+}
+
+async function toggleRouteStopsDirection() {
+  const dirs = await getRouteDirections(routeStopsService);
+  routeStopsDirection =
+    dirs.find((d) => d !== routeStopsDirection) ?? routeStopsDirection;
+  await renderRouteStopsList();
+}
+
+function backToRouteStops() {
+  document.getElementById("routeStopDetail").classList.add("hidden");
+  document.getElementById("routeStopsListView").classList.remove("hidden");
+}
+
+async function openRouteStopDetail(code) {
+  document.getElementById("routeStopsListView").classList.add("hidden");
+  document.getElementById("routeStopDetail").classList.remove("hidden");
+  const body = document.getElementById("routeStopDetailBody");
+  const stopName = await getStopName(code);
+
+  // Complete list of services that serve this stop (from the route table).
+  let allServices = [];
+  try {
+    const routes = await loadBusRoutes();
+    allServices = [...new Set(routes.filter((r) => r.BusStopCode === code).map((r) => r.ServiceNo))]
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  } catch {}
+
+  const chips = allServices.length
+    ? `<div class="route-detail-section-label">All services here</div>
+       <div class="route-all-services">
+         ${allServices.map((no) => `<button class="route-svc-chip" onclick="openRouteStops('${no}','${code}')">${no}</button>`).join("")}
+       </div>`
+    : "";
+
+  body.innerHTML = `
+    <div class="route-detail-name">${escapeHtml(stopName)}</div>
+    <div class="route-detail-code">${code}</div>
+    <div class="route-detail-section-label">Live arrivals</div>
+    <div id="routeStopDetailArrivals">${arrivalSkeleton()}</div>
+    ${chips}
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="document.getElementById('routeStopsModal').classList.add('hidden');goToStop('${code}')">Full arrivals ↗</button>
+    </div>`;
+
+  // Load live arrivals into the detail view, reusing the arrivals renderer.
+  try {
+    const data = await fetchArrivals(code);
+    const target = document.getElementById("routeStopDetailArrivals");
+    if (!target) return; // user navigated away
+    if (!data.Services || data.Services.length === 0) {
+      target.innerHTML = `<div class="empty-state"><p>No buses running right now.</p></div>`;
+      return;
+    }
+    const services = data.Services.map((svc) => ({
+      no: svc.ServiceNo,
+      times: [svc.NextBus, svc.NextBus2, svc.NextBus3].map((b) => parseBusArrival(b)),
+    }));
+    services.sort((a, b) => {
+      const aMin = Math.min(...a.times.map((t) => t.min ?? 999));
+      const bMin = Math.min(...b.times.map((t) => t.min ?? 999));
+      return aMin - bMin;
+    });
+    target.innerHTML = services.map((svc) => renderServiceRow(svc, code)).join("");
+  } catch {
+    const target = document.getElementById("routeStopDetailArrivals");
+    if (target) target.innerHTML = `<div class="empty-state"><p>Couldn't load arrivals.</p></div>`;
+  }
 }
 
 function locateOnMap() {
