@@ -1132,9 +1132,351 @@
       .notification-toast { animation: none; }
       * { transition-duration: 0.01ms !important; }
     }
+
+    /* ════════════════════════════════════════
+       SPLASH / STARTUP ANIMATION
+    ════════════════════════════════════════ */
+    #splashScreen {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background: linear-gradient(160deg, #0c6b65 0%, #0d9488 60%, #065f5a 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    #splashScreen.splash-done {
+      pointer-events: none;
+      animation: splashFadeOut 0.5s ease-in 0.1s forwards;
+    }
+    @keyframes splashFadeOut {
+      from { opacity: 1; }
+      to   { opacity: 0; }
+    }
+
+    /* Road strip */
+    .splash-road {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 28%;
+      background: #065f5a;
+      border-top: 3px solid #F59E0B;
+      overflow: hidden;
+    }
+    .splash-road-dash {
+      position: absolute;
+      top: 30px;
+      height: 7px;
+      width: 55px;
+      border-radius: 4px;
+      background: #F59E0B;
+      opacity: 0.4;
+      animation: dashScroll 0.35s linear infinite;
+    }
+    .splash-road-dash:nth-child(1) { left:  5%; animation-delay: 0s; }
+    .splash-road-dash:nth-child(2) { left: 25%; animation-delay:-0.1s; }
+    .splash-road-dash:nth-child(3) { left: 45%; animation-delay:-0.2s; }
+    .splash-road-dash:nth-child(4) { left: 65%; animation-delay:-0.07s; }
+    .splash-road-dash:nth-child(5) { left: 85%; animation-delay:-0.14s; }
+    @keyframes dashScroll {
+      0%   { transform: translateX(0); }
+      100% { transform: translateX(-80px); }
+    }
+
+    /* Bus container – handles horizontal travel */
+    .splash-bus-track {
+      position: absolute;
+      bottom: 28%;
+      left: 0; right: 0;
+      display: flex;
+      align-items: flex-end;
+      height: 200px;
+      animation: busTravel 1.5s cubic-bezier(0.22,1,0.36,1) 0.1s forwards;
+      transform: translateX(-115%);
+    }
+    @keyframes busTravel {
+      0%   { transform: translateX(-115%); }
+      72%  { transform: translateX(calc(50vw - 200px)); }       /* arriving at centre */
+      80%  { transform: translateX(calc(50vw - 185px)); }       /* slight overshoot */
+      88%  { transform: translateX(calc(50vw - 200px)); }       /* bounce back 1 */
+      93%  { transform: translateX(calc(50vw - 195px)); }       /* micro bounce 2 */
+      100% { transform: translateX(calc(50vw - 200px)); }       /* settled */
+    }
+
+    /* Bus body tilt on hard stop */
+    .splash-bus-body {
+      transform-origin: bottom center;
+      animation: busTilt 1.5s cubic-bezier(0.22,1,0.36,1) 0.1s forwards;
+      transform: rotate(0deg);
+    }
+    @keyframes busTilt {
+      0%   { transform: rotate(0deg); }
+      72%  { transform: rotate(0deg); }
+      80%  { transform: rotate(-4deg); }  /* pitch forward on stop */
+      90%  { transform: rotate(1deg); }   /* rock back */
+      100% { transform: rotate(0deg); }
+    }
+
+    /* Screen shake on impact */
+    #splashScreen.splash-shake {
+      animation: screenShake 0.25s ease 1.25s;
+    }
+    @keyframes screenShake {
+      0%   { transform: translateX(0); }
+      20%  { transform: translateX(-6px); }
+      40%  { transform: translateX(5px); }
+      60%  { transform: translateX(-3px); }
+      80%  { transform: translateX(2px); }
+      100% { transform: translateX(0); }
+    }
+
+    /* Dust puff (circles that expand and fade) */
+    .splash-dust {
+      position: absolute;
+      bottom: calc(28% + 12px);
+      left: calc(50vw - 200px);
+      pointer-events: none;
+    }
+    .splash-dust-particle {
+      position: absolute;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.5);
+      opacity: 0;
+      animation: dustPuff 0.6s ease-out forwards;
+    }
+    .splash-dust-particle:nth-child(1) { width:18px; height:18px; left:-10px; top:-8px;  animation-delay: 1.22s; }
+    .splash-dust-particle:nth-child(2) { width:12px; height:12px; left:  8px; top:-16px; animation-delay: 1.26s; }
+    .splash-dust-particle:nth-child(3) { width:22px; height:22px; left:-24px; top:-4px;  animation-delay: 1.24s; }
+    .splash-dust-particle:nth-child(4) { width:10px; height:10px; left: 18px; top:-6px;  animation-delay: 1.28s; }
+    .splash-dust-particle:nth-child(5) { width:16px; height:16px; left: -4px; top:-24px; animation-delay: 1.30s; }
+    @keyframes dustPuff {
+      0%   { transform: scale(0.3) translate(0,0);  opacity: 0.8; }
+      60%  { opacity: 0.5; }
+      100% { transform: scale(2.5) translate(var(--dx,0px),var(--dy,-20px)); opacity: 0; }
+    }
+    .splash-dust-particle:nth-child(1) { --dx: -12px; --dy: -14px; }
+    .splash-dust-particle:nth-child(2) { --dx:   6px; --dy: -20px; }
+    .splash-dust-particle:nth-child(3) { --dx: -18px; --dy: -8px; }
+    .splash-dust-particle:nth-child(4) { --dx:  16px; --dy: -12px; }
+    .splash-dust-particle:nth-child(5) { --dx:  -2px; --dy: -26px; }
+
+    /* Wheel spin stops when bus stops */
+    .splash-wheel {
+      animation: wheelSpin 0.15s linear infinite;
+    }
+    .splash-wheel.stopped {
+      animation: none;
+    }
+    @keyframes wheelSpin {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+
+    /* Brake lights flash */
+    .splash-brake {
+      opacity: 0;
+      animation: brakeFlash 0.5s ease 1.22s forwards;
+    }
+    @keyframes brakeFlash {
+      0%   { opacity: 0; }
+      30%  { opacity: 1; }
+      60%  { opacity: 0.7; }
+      100% { opacity: 0.9; }
+    }
+
+    /* Logo + tagline reveal */
+    .splash-logo-wrap {
+      position: absolute;
+      top: 12%;
+      left: 0; right: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      opacity: 0;
+      transform: translateY(16px);
+      animation: logoReveal 0.55s ease-out 1.35s forwards;
+    }
+    @keyframes logoReveal {
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .splash-logo-text {
+      font-family: -apple-system, BlinkMacSystemFont, 'Arial Black', Arial, sans-serif;
+      font-size: clamp(32px, 9vw, 52px);
+      font-weight: 900;
+      color: #fff;
+      letter-spacing: -1px;
+      text-shadow: 0 2px 16px rgba(0,0,0,0.25);
+    }
+    .splash-logo-sub {
+      font-size: 13px;
+      font-weight: 600;
+      color: #FBBF24;
+      letter-spacing: 5px;
+      text-transform: uppercase;
+    }
+    .splash-gold-line {
+      width: 160px;
+      height: 3px;
+      border-radius: 2px;
+      background: linear-gradient(90deg, #F59E0B, #FBBF24, #F59E0B);
+    }
+
+    /* Bus SVG itself */
+    .splash-bus-svg {
+      width: 400px;
+      max-width: 90vw;
+      height: auto;
+      display: block;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #splashScreen { display: none; }
+    }
   </style>
 </head>
 <body>
+
+  <!-- ═══════════════════════════════════════
+       STARTUP SPLASH ANIMATION
+  ════════════════════════════════════════ -->
+  <div id="splashScreen" aria-hidden="true">
+
+    <!-- Logo / wordmark (revealed after bus stops) -->
+    <div class="splash-logo-wrap">
+      <div class="splash-logo-text">Bus Buddy</div>
+      <div class="splash-gold-line"></div>
+      <div class="splash-logo-sub">Singapore</div>
+    </div>
+
+    <!-- Animated bus on its track -->
+    <div class="splash-bus-track" id="splashBusTrack">
+      <div class="splash-bus-body" id="splashBusBody">
+        <svg class="splash-bus-svg" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="sg-gold" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stop-color="#F59E0B"/>
+              <stop offset="50%" stop-color="#FBBF24"/>
+              <stop offset="100%" stop-color="#F59E0B"/>
+            </linearGradient>
+            <clipPath id="bus-clip">
+              <rect x="0" y="0" width="380" height="190"/>
+            </clipPath>
+          </defs>
+
+          <!-- ── Lower deck ── -->
+          <rect x="0" y="90" width="380" height="88" rx="12" fill="#ffffff"/>
+          <!-- Lower teal base stripe -->
+          <rect x="0" y="90" width="380" height="14" fill="#0d9488"/>
+          <!-- Lower gold accent stripe -->
+          <rect x="0" y="148" width="380" height="8" fill="url(#sg-gold)"/>
+
+          <!-- ── Upper deck ── -->
+          <rect x="10" y="4" width="346" height="84" rx="10" fill="#ffffff"/>
+          <!-- Upper teal stripe -->
+          <rect x="10" y="4" width="346" height="12" fill="#0d9488"/>
+          <!-- Destination board (dark strip) -->
+          <rect x="10" y="0" width="346" height="6" rx="3" fill="#065f5a"/>
+
+          <!-- Deck divider -->
+          <rect x="0" y="86" width="380" height="6" fill="#0d9488"/>
+
+          <!-- ── Upper deck windows (5) ── -->
+          <rect x="20"  y="18" width="52" height="44" rx="5" fill="#b2eae5" opacity="0.9"/>
+          <rect x="82"  y="18" width="52" height="44" rx="5" fill="#b2eae5" opacity="0.9"/>
+          <rect x="144" y="18" width="52" height="44" rx="5" fill="#b2eae5" opacity="0.9"/>
+          <rect x="206" y="18" width="52" height="44" rx="5" fill="#b2eae5" opacity="0.9"/>
+          <rect x="268" y="18" width="52" height="44" rx="5" fill="#b2eae5" opacity="0.9"/>
+
+          <!-- ── Lower deck windows (4) ── -->
+          <rect x="50"  y="104" width="52" height="44" rx="5" fill="#b2eae5" opacity="0.9"/>
+          <rect x="112" y="104" width="52" height="44" rx="5" fill="#b2eae5" opacity="0.9"/>
+          <rect x="174" y="104" width="52" height="44" rx="5" fill="#b2eae5" opacity="0.9"/>
+          <rect x="236" y="104" width="52" height="44" rx="5" fill="#b2eae5" opacity="0.9"/>
+
+          <!-- Route number badge -->
+          <rect x="298" y="110" width="58" height="22" rx="8" fill="url(#sg-gold)"/>
+          <text x="327" y="126" text-anchor="middle" fill="#065f5a" font-family="Arial,sans-serif" font-size="13" font-weight="900">SVC 65</text>
+
+          <!-- ── Rear door (left side) ── -->
+          <rect x="0" y="104" width="42" height="44" fill="#ebebeb"/>
+          <line x1="21" y1="104" x2="21" y2="148" stroke="#ccc" stroke-width="2"/>
+          <circle cx="35" cy="126" r="4" fill="#0d9488"/>
+
+          <!-- ── Front cab (right side) ── -->
+          <rect x="330" y="4" width="50" height="174" rx="10" fill="#f0fffe"/>
+          <!-- Front upper windshield -->
+          <rect x="332" y="14" width="44" height="52" rx="5" fill="#b2eae5" opacity="0.8"/>
+          <!-- Front lower windshield -->
+          <rect x="332" y="102" width="44" height="46" rx="5" fill="#b2eae5" opacity="0.8"/>
+          <!-- Headlights -->
+          <rect x="362" y="20" width="18" height="30" rx="5" fill="#FFF9C4"/>
+          <rect x="362" y="104" width="18" height="26" rx="5" fill="#FFF9C4"/>
+          <!-- Front bumper -->
+          <rect x="334" y="170" width="44" height="8" rx="4" fill="#0d9488"/>
+
+          <!-- ── Brake lights (rear left) ── -->
+          <rect class="splash-brake" x="0" y="104" width="6" height="24" rx="3" fill="#ef4444"/>
+          <rect class="splash-brake" x="0" y="58" width="6" height="20" rx="3" fill="#ef4444"/>
+
+          <!-- ── Wheels ── -->
+          <!-- Rear wheel -->
+          <g transform="translate(78, 178)">
+            <circle r="22" fill="#1a1a1a"/>
+            <circle r="14" fill="#2d2d2d"/>
+            <circle r="7"  fill="#444"/>
+            <circle r="3"  fill="#666"/>
+            <!-- Spokes (animated group) -->
+            <g class="splash-wheel" id="splashWheelRear">
+              <line x1="0" y1="-14" x2="0" y2="14" stroke="#555" stroke-width="2.5"/>
+              <line x1="-14" y1="0" x2="14" y2="0" stroke="#555" stroke-width="2.5"/>
+              <line x1="-10" y1="-10" x2="10" y2="10" stroke="#555" stroke-width="2.5"/>
+              <line x1="10" y1="-10" x2="-10" y2="10" stroke="#555" stroke-width="2.5"/>
+            </g>
+          </g>
+          <!-- Rear wheel arch -->
+          <path d="M44 168 Q78 148 112 168" fill="none" stroke="#0d9488" stroke-width="5" stroke-linecap="round"/>
+
+          <!-- Front wheel -->
+          <g transform="translate(290, 178)">
+            <circle r="22" fill="#1a1a1a"/>
+            <circle r="14" fill="#2d2d2d"/>
+            <circle r="7"  fill="#444"/>
+            <circle r="3"  fill="#666"/>
+            <g class="splash-wheel" id="splashWheelFront">
+              <line x1="0" y1="-14" x2="0" y2="14" stroke="#555" stroke-width="2.5"/>
+              <line x1="-14" y1="0" x2="14" y2="0" stroke="#555" stroke-width="2.5"/>
+              <line x1="-10" y1="-10" x2="10" y2="10" stroke="#555" stroke-width="2.5"/>
+              <line x1="10" y1="-10" x2="-10" y2="10" stroke="#555" stroke-width="2.5"/>
+            </g>
+          </g>
+          <!-- Front wheel arch -->
+          <path d="M256 168 Q290 148 324 168" fill="none" stroke="#0d9488" stroke-width="5" stroke-linecap="round"/>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Dust puff (appears on hard stop) -->
+    <div class="splash-dust" id="splashDust">
+      <div class="splash-dust-particle"></div>
+      <div class="splash-dust-particle"></div>
+      <div class="splash-dust-particle"></div>
+      <div class="splash-dust-particle"></div>
+      <div class="splash-dust-particle"></div>
+    </div>
+
+    <!-- Road strip with scrolling dashes -->
+    <div class="splash-road">
+      <div class="splash-road-dash"></div>
+      <div class="splash-road-dash"></div>
+      <div class="splash-road-dash"></div>
+      <div class="splash-road-dash"></div>
+      <div class="splash-road-dash"></div>
+    </div>
+  </div>
+
   <header>
     <div>
       <h1>Bus Buddy</h1>
@@ -1527,6 +1869,31 @@
   </div>
 
   <div id="toast" class="notification-toast hidden" role="status" aria-live="polite"></div>
+
+  <script>
+    (function() {
+      var splash = document.getElementById('splashScreen');
+      if (!splash) return;
+
+      // Stop wheel spin at the moment the bus hits its stop (~1.22s into the animation)
+      var stopDelay = 1220;
+      setTimeout(function() {
+        var wheels = document.querySelectorAll('.splash-wheel');
+        wheels.forEach(function(w) { w.classList.add('stopped'); });
+        // Trigger screen shake
+        splash.classList.add('splash-shake');
+      }, stopDelay);
+
+      // Dismiss splash after animation completes
+      setTimeout(function() {
+        splash.classList.add('splash-done');
+        // Remove from DOM after fade-out finishes
+        setTimeout(function() {
+          splash.style.display = 'none';
+        }, 600);
+      }, 2400);
+    })();
+  </script>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
