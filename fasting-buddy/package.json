@@ -1,0 +1,14 @@
+{
+  "name": "fasttrack",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Intermittent fasting timer with food, macro, calorie and weight tracking (PWA).",
+  "scripts": {
+    "dev": "node local/server.js",
+    "start": "node local/server.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "web-push": "^3.6.7"
+  }
+}
