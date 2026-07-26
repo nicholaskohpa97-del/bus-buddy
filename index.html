@@ -1124,17 +1124,113 @@
       padding-right: 36px;
     }
 
+    /* ── Splash screen (bus-on-rail launch animation) ── */
+    .splash-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      pointer-events: none;
+      background: linear-gradient(to bottom, #ED2939 0%, #ED2939 55%, #ffffff 55%, #ffffff 100%);
+    }
+    .splash-screen.splash-hide {
+      animation: splashFadeOut 0.4s ease forwards;
+    }
+    .splash-rail {
+      position: absolute;
+      left: 8%;
+      right: 8%;
+      top: calc(50% + 33px);
+      height: 8px;
+      border-radius: 4px;
+      background: repeating-linear-gradient(90deg, #B91C2C 0 6px, transparent 6px 26px);
+    }
+    .splash-bus {
+      position: relative;
+      animation: splashBusRun 0.9s cubic-bezier(.2,.7,.3,1) forwards,
+                 splashBusBump 0.28s ease-out 0.9s forwards;
+    }
+    .splash-wheel {
+      animation: splashWheelSpin 0.3s linear 3;
+    }
+    @keyframes splashBusRun {
+      from { transform: translateX(-160px); }
+      to { transform: translateX(0); }
+    }
+    @keyframes splashBusBump {
+      0% { transform: translateY(0); }
+      35% { transform: translateY(-7px); }
+      60% { transform: translateY(2px); }
+      100% { transform: translateY(0); }
+    }
+    @keyframes splashWheelSpin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    @keyframes splashFadeOut {
+      from { opacity: 1; }
+      to { opacity: 0; visibility: hidden; }
+    }
+
     /* ── Reduced motion ── */
     @media (prefers-reduced-motion: reduce) {
       .skeleton { animation: none; }
       .dropoff-active .pulse { animation: none; }
       .auto-refresh .dot { animation: none; }
       .notification-toast { animation: none; }
+      .splash-screen { display: none; }
       * { transition-duration: 0.01ms !important; }
     }
   </style>
 </head>
 <body>
+  <div id="splashScreen" class="splash-screen" aria-hidden="true">
+    <div class="splash-rail"></div>
+    <svg class="splash-bus" width="140" height="91" viewBox="0 0 200 130" xmlns="http://www.w3.org/2000/svg">
+      <rect x="20" y="36" width="160" height="64" rx="18" fill="#ffffff" stroke="#ED2939" stroke-width="6"/>
+      <rect x="38" y="50" width="26" height="30" rx="7" fill="#ED2939"/>
+      <rect x="74" y="50" width="26" height="30" rx="7" fill="#ED2939"/>
+      <rect x="110" y="50" width="26" height="30" rx="7" fill="#ED2939"/>
+      <rect x="146" y="50" width="20" height="30" rx="7" fill="#ED2939"/>
+      <rect x="20" y="90" width="160" height="10" rx="3" fill="#ED2939"/>
+      <circle cx="172" cy="95" r="5" fill="#B91C2C"/>
+      <g class="splash-wheel" style="transform-origin: 64px 104px;">
+        <circle cx="64" cy="104" r="16" fill="#1c1917"/>
+        <circle cx="64" cy="104" r="6" fill="#ffffff"/>
+      </g>
+      <g class="splash-wheel" style="transform-origin: 156px 104px;">
+        <circle cx="156" cy="104" r="16" fill="#1c1917"/>
+        <circle cx="156" cy="104" r="6" fill="#ffffff"/>
+      </g>
+    </svg>
+  </div>
+  <script>
+    (function () {
+      var el = document.getElementById("splashScreen");
+      if (!el) return;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        el.remove();
+        return;
+      }
+      var start = Date.now();
+      var MIN_VISIBLE_MS = 1200; // let the run+bump animation play out even on a fast/cached load
+      var FALLBACK_MS = 4000; // safety net if app init never signals ready
+      var done = false;
+      function hide() {
+        if (done) return;
+        done = true;
+        el.classList.add("splash-hide");
+        setTimeout(function () { el.remove(); }, 400);
+      }
+      window.__hideSplash = function () {
+        setTimeout(hide, Math.max(0, MIN_VISIBLE_MS - (Date.now() - start)));
+      };
+      setTimeout(hide, FALLBACK_MS);
+    })();
+  </script>
   <header>
     <div>
       <h1>Bus Buddy</h1>
