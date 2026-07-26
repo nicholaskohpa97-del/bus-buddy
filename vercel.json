@@ -3,6 +3,12 @@
   "functions": {
     "api/check-reminders.js": {
       "maxDuration": 30
+    },
+    "api/bus-stops.js": {
+      "maxDuration": 30
+    },
+    "api/bus-routes.js": {
+      "maxDuration": 30
     }
   }
 }

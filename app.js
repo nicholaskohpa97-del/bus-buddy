@@ -304,11 +304,21 @@ async function loadBusRoutes(forceRefresh = false) {
   }
 
   showToast("Loading bus route map (one-time)...");
-  const res = await fetch("/api/bus-routes");
-  if (!res.ok) throw new Error(`API error ${res.status}`);
-  const data = await res.json();
-  busRoutes = data.value || [];
-  await setCachedBusRoutes(busRoutes);
+  try {
+    const res = await fetch("/api/bus-routes");
+    if (!res.ok) throw new Error(`API error ${res.status}`);
+    const data = await res.json();
+    busRoutes = data.value || [];
+    await setCachedBusRoutes(busRoutes);
+  } catch (err) {
+    const cached = await getCachedBusRoutes();
+    if (cached) {
+      busRoutes = cached.routes;
+      showToast("Using offline route data");
+    } else {
+      throw err;
+    }
+  }
   return busRoutes;
 }
 
