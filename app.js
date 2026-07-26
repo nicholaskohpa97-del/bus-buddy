@@ -140,6 +140,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   maybeShowOnboarding();
   document.addEventListener('click', unlockAudio, { once: true });
   document.addEventListener('touchstart', unlockAudio, { once: true });
+  if (window.__hideSplash) window.__hideSplash();
 });
 
 // ── API ──
