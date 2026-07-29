@@ -702,6 +702,7 @@
     }
     .empty-state .icon { font-size: 40px; margin-bottom: 12px; opacity: 0.6; }
     .empty-state p { font-size: 14px; line-height: 1.6; }
+    .empty-state .btn { margin-top: 12px; }
 
     /* ── Search Results ── */
     .search-results {
@@ -733,6 +734,22 @@
       background: var(--surface2);
     }
     .search-result-item-service .search-result-name { color: var(--accent); }
+    .search-result-item--dist {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .search-result-dist {
+      font-weight: 700;
+      font-size: 12px;
+      color: var(--accent);
+      white-space: nowrap;
+      background: var(--accent-bg);
+      padding: 3px 9px;
+      border-radius: 8px;
+      flex: 0 0 auto;
+    }
     /* reusable stop autocomplete (attached to bus-stop inputs) */
     .stop-ac-wrap { position: relative; }
     .stop-suggest {
@@ -1283,6 +1300,18 @@
 
     <!-- HOME / DASHBOARD TAB -->
     <div id="tab-dashboard">
+      <div class="search-bar">
+        <div class="search-wrapper">
+          <svg class="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input type="text" id="homeStopSearch" placeholder="Search stop, address, road or bus no." data-i18n-ph="search.placeholder" oninput="handleSearch(this.value,'home')" onfocus="handleSearchFocus('home')" aria-label="Search bus stops">
+        </div>
+        <button class="btn btn-nearme" onclick="findNearbyStops('home')" title="Find nearest bus stops">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
+          <span data-i18n="search.nearby">Nearby</span>
+        </button>
+      </div>
+      <div id="homeSearchResults" class="search-results hidden"></div>
+      <div id="homeNearbyResults" class="hidden"></div>
       <div class="dash-section">
         <div id="dashPlaces" class="dash-places" aria-label="Home and work shortcuts"></div>
       </div>
@@ -1296,6 +1325,13 @@
           <div class="icon">&#9734;</div>
           <p>No favourite stops yet.<br><a href="#" onclick="switchTab('arrivals');return false" style="color:var(--accent)">Search for a bus stop</a> and tap the star to save it.</p>
         </div>
+      </div>
+      <div class="dash-section">
+        <div class="dash-section-header">
+          <h3 data-i18n="dash.nearbyStops">Nearby Stops</h3>
+          <button class="btn btn-ghost btn-sm" onclick="refreshDashNearby(true)" data-i18n="common.refresh">Refresh</button>
+        </div>
+        <div id="dashNearby"></div>
       </div>
       <div class="dash-section">
         <div class="dash-section-header">

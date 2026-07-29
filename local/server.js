@@ -56,6 +56,28 @@ async function handleAPI(req, res, pathname) {
     return fetchPaginated(res, "BusRoutes");
   }
 
+  if (pathname === "/api/geocode") {
+    const q = (url.searchParams.get("q") || "").trim();
+    if (!q) return json(res, { error: "q required" }, 400);
+    try {
+      const geoUrl = `https://www.onemap.gov.sg/api/common/elastic/search?searchVal=${encodeURIComponent(q)}&returnGeom=Y&getAddrDetails=Y&pageNum=1`;
+      const r = await fetch(geoUrl, { headers: { accept: "application/json" } });
+      const data = await r.json();
+      const results = (data.results || [])
+        .map((v) => ({
+          address: v.ADDRESS,
+          postal: v.POSTAL,
+          latitude: parseFloat(v.LATITUDE),
+          longitude: parseFloat(v.LONGITUDE),
+        }))
+        .filter((v) => Number.isFinite(v.latitude) && Number.isFinite(v.longitude))
+        .slice(0, 5);
+      return json(res, { results });
+    } catch (err) {
+      return json(res, { error: "Failed to geocode", details: err.message }, 502);
+    }
+  }
+
   json(res, { error: "Not found" }, 404);
 }
 
