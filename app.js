@@ -461,19 +461,65 @@ async function searchBusServices(query, limit = 8) {
   return matches.slice(0, limit);
 }
 
+// Singapore postal codes are exactly 6 digits — distinct from 5-digit bus
+// stop codes and never used for service numbers, so this is unambiguous.
+function isPostalCode(q) {
+  return /^\d{6}$/.test((q || "").trim());
+}
+
+// Resolves a road name / address / postal code to a location via OneMap's
+// public geocoder, so free-text place queries ("Beach Road", "541298") can
+// be ranked by actual distance rather than just text matching. Small
+// same-session cache avoids re-hitting the network for repeated queries.
+const geocodeCache = new Map();
+async function geocodeAddress(query) {
+  const q = (query || "").trim();
+  if (!q) return null;
+  if (geocodeCache.has(q)) return geocodeCache.get(q);
+  try {
+    const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
+    if (!res.ok) throw new Error(`geocode ${res.status}`);
+    const data = await res.json();
+    const result = (data.results && data.results[0]) || null;
+    geocodeCache.set(q, result);
+    return result;
+  } catch {
+    return null; // not cached — a transient failure shouldn't stick
+  }
+}
+
+// Bus stops within `limit` of a lat/lng, nearest first.
+async function stopsNear(latitude, longitude, limit = 8) {
+  const stops = await loadBusStops();
+  return stops
+    .map((s) => ({ ...s, dist: haversine(latitude, longitude, s.Latitude, s.Longitude) }))
+    .sort((a, b) => a.dist - b.dist)
+    .slice(0, limit);
+}
+
+// Search UI is duplicated in two places — the dedicated Search tab and the
+// home-page quick-search bar — sharing this logic via a scope name so
+// there's one implementation instead of two copies.
+const SEARCH_SCOPES = {
+  arrivals: { input: "stopSearch", results: "searchResults", nearby: "nearbyResults" },
+  home: { input: "homeStopSearch", results: "homeSearchResults", nearby: "homeNearbyResults" },
+};
+
 let searchDebounce = null;
-async function handleSearch(val) {
+let searchGeneration = 0;
+async function handleSearch(val, scope = "arrivals") {
   clearTimeout(searchDebounce);
-  const container = document.getElementById("searchResults");
+  const cfg = SEARCH_SCOPES[scope];
+  const container = document.getElementById(cfg.results);
   const trimmed = (val || "").trim();
   if (!trimmed) {
     // Query cleared back to empty while still focused — re-offer nearby
     // suggestions since no fresh "focus" event fires in that case.
     container.classList.add("hidden");
-    maybeSuggestNearby();
+    maybeSuggestNearby(scope);
     return;
   }
-  document.getElementById("nearbyResults").classList.add("hidden");
+  document.getElementById(cfg.nearby).classList.add("hidden");
   if (trimmed.length < 2) {
     container.classList.add("hidden");
     return;
@@ -482,15 +528,33 @@ async function handleSearch(val) {
     container.classList.add("hidden");
     return;
   }
+
+  const postal = isPostalCode(trimmed);
+  const pureNumeric = /^\d+$/.test(trimmed);
+  const shouldGeocode = postal || (!pureNumeric && trimmed.length >= 4);
+
+  const myGen = ++searchGeneration;
   searchDebounce = setTimeout(async () => {
     try {
-      const [services, stops] = await Promise.all([
-        searchBusServices(val, 6),
-        searchStops(val, 20),
+      const [services, stops, geo] = await Promise.all([
+        postal ? [] : searchBusServices(val, 6),
+        postal ? [] : searchStops(val, 20),
+        shouldGeocode ? geocodeAddress(trimmed) : null,
       ]);
-      if (services.length === 0 && stops.length === 0) {
-        container.innerHTML =
-          '<div class="search-result-item"><span class="search-result-detail">No stops or bus services found</span></div>';
+      if (myGen !== searchGeneration) return; // superseded by a newer search
+
+      let near = [];
+      if (geo) {
+        near = await stopsNear(geo.latitude, geo.longitude, 8);
+        if (myGen !== searchGeneration) return;
+      }
+      const nearCodes = new Set(near.map((s) => s.BusStopCode));
+      const otherStops = stops.filter((s) => !nearCodes.has(s.BusStopCode));
+
+      if (services.length === 0 && near.length === 0 && otherStops.length === 0) {
+        container.innerHTML = postal
+          ? `<div class="search-result-item"><span class="search-result-detail">No location found for postal code ${escapeHtml(trimmed)}</span></div>`
+          : '<div class="search-result-item"><span class="search-result-detail">No stops or bus services found</span></div>';
       } else {
         let html = "";
         if (services.length > 0) {
@@ -498,19 +562,35 @@ async function handleSearch(val) {
           html += services
             .map(
               (no) => `
-            <div class="search-result-item search-result-item-service" onclick="selectService('${escapeHtml(no)}')">
+            <div class="search-result-item search-result-item-service" onclick="selectService('${escapeHtml(no)}','${scope}')">
               <div class="search-result-name">&#128652; Bus ${escapeHtml(no)}</div>
               <div class="search-result-detail">Tap to view route &amp; stops</div>
             </div>`
             )
             .join("");
         }
-        if (stops.length > 0) {
-          if (services.length > 0) html += `<div class="search-section-label">Bus stops</div>`;
-          html += stops
+        if (near.length > 0) {
+          const label = geo.address ? escapeHtml(geo.address) : escapeHtml(trimmed);
+          html += `<div class="search-section-label">Near ${label}</div>`;
+          html += near
             .map(
               (s) => `
-            <div class="search-result-item" onclick="selectStop('${s.BusStopCode}')">
+            <div class="search-result-item search-result-item--dist" onclick="selectStop('${s.BusStopCode}','${scope}')">
+              <div>
+                <div class="search-result-name">${escapeHtml(s.Description)}</div>
+                <div class="search-result-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
+              </div>
+              <span class="search-result-dist">${formatDist(s.dist)}</span>
+            </div>`
+            )
+            .join("");
+        }
+        if (otherStops.length > 0) {
+          if (services.length > 0 || near.length > 0) html += `<div class="search-section-label">Matching stops</div>`;
+          html += otherStops
+            .map(
+              (s) => `
+            <div class="search-result-item" onclick="selectStop('${s.BusStopCode}','${scope}')">
               <div class="search-result-name">${escapeHtml(s.Description)}</div>
               <div class="search-result-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
             </div>`
@@ -521,21 +601,25 @@ async function handleSearch(val) {
       }
       container.classList.remove("hidden");
     } catch {
-      container.classList.add("hidden");
+      if (myGen === searchGeneration) container.classList.add("hidden");
     }
   }, 300);
 }
 
-function selectService(serviceNo) {
-  document.getElementById("searchResults").classList.add("hidden");
-  document.getElementById("nearbyResults").classList.add("hidden");
+function selectService(serviceNo, scope = "arrivals") {
+  const cfg = SEARCH_SCOPES[scope];
+  document.getElementById(cfg.results).classList.add("hidden");
+  document.getElementById(cfg.nearby).classList.add("hidden");
   openRouteStops(serviceNo);
 }
 
-function selectStop(code) {
+function selectStop(code, scope = "arrivals") {
+  const cfg = SEARCH_SCOPES[scope];
+  document.getElementById(cfg.input).value = code;
+  document.getElementById(cfg.results).classList.add("hidden");
+  document.getElementById(cfg.nearby).classList.add("hidden");
+  switchTab("arrivals");
   document.getElementById("stopSearch").value = code;
-  document.getElementById("searchResults").classList.add("hidden");
-  document.getElementById("nearbyResults").classList.add("hidden");
   searchStop();
 }
 
@@ -1528,6 +1612,96 @@ function refreshDashboard() {
   renderDashFavourites();
   renderDashReminders();
   renderDashDropoffs();
+  refreshDashNearby();
+}
+
+// ── Dashboard "Nearby Stops" section ──
+// Distinct from the search bar's suggestions: this is a persistent widget,
+// so it's fine to actively request location on a real (button) gesture, but
+// on plain dashboard visits it only auto-populates when permission is
+// already granted — never surprises the user with a permission prompt.
+let dashNearbyCache = null;
+let dashNearbyCacheAt = 0;
+const DASH_NEARBY_TTL_MS = 60 * 1000;
+
+async function refreshDashNearby(forcePrompt = false) {
+  const container = document.getElementById("dashNearby");
+  if (!container) return;
+
+  if (!navigator.geolocation) {
+    container.innerHTML = `<div class="empty-state"><p>Geolocation isn't supported in this browser.</p></div>`;
+    return;
+  }
+
+  if (!forcePrompt && dashNearbyCache && Date.now() - dashNearbyCacheAt < DASH_NEARBY_TTL_MS) {
+    renderDashNearby(dashNearbyCache);
+    return;
+  }
+
+  if (!forcePrompt && navigator.permissions && navigator.permissions.query) {
+    try {
+      const status = await navigator.permissions.query({ name: "geolocation" });
+      if (status.state === "denied") {
+        container.innerHTML = `<div class="empty-state"><p>Location access is blocked. Enable it in your browser settings to see nearby stops.</p></div>`;
+        return;
+      }
+      if (status.state === "prompt") {
+        container.innerHTML = `
+          <div class="empty-state">
+            <p>See the bus stops closest to you.</p>
+            <button class="btn btn-sm" onclick="refreshDashNearby(true)">Enable location</button>
+          </div>`;
+        return;
+      }
+    } catch {
+      container.innerHTML = `
+        <div class="empty-state">
+          <p>See the bus stops closest to you.</p>
+          <button class="btn btn-sm" onclick="refreshDashNearby(true)">Enable location</button>
+        </div>`;
+      return;
+    }
+  }
+
+  container.innerHTML = `<div class="nearby-locating">Locating you...</div>`;
+  navigator.geolocation.getCurrentPosition(
+    async (pos) => {
+      const { latitude, longitude } = pos.coords;
+      try {
+        const nearest = await stopsNear(latitude, longitude, 5);
+        dashNearbyCache = nearest;
+        dashNearbyCacheAt = Date.now();
+        renderDashNearby(nearest);
+      } catch {
+        container.innerHTML = `<div class="empty-state"><p>Couldn't load bus stops.</p></div>`;
+      }
+    },
+    () => {
+      container.innerHTML = `
+        <div class="empty-state">
+          <p>Couldn't get your location.</p>
+          <button class="btn btn-sm" onclick="refreshDashNearby(true)">Try again</button>
+        </div>`;
+    },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+
+function renderDashNearby(nearest) {
+  const container = document.getElementById("dashNearby");
+  if (!container) return;
+  container.innerHTML = nearest
+    .map(
+      (s) => `
+    <div class="nearby-card" onclick="selectStop('${s.BusStopCode}','home')">
+      <div class="nearby-info">
+        <div class="nearby-name">${escapeHtml(s.Description)}</div>
+        <div class="nearby-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
+      </div>
+      <div class="nearby-dist">${formatDist(s.dist)}</div>
+    </div>`
+    )
+    .join("");
 }
 
 function renderDashFavourites() {
@@ -2125,8 +2299,9 @@ function locateOnMap() {
 // stops are found nearby, so "top suggestions" stay genuinely close by.
 const NEARBY_RADII_M = [300, 500, 1000];
 
-async function findNearbyStops() {
-  const container = document.getElementById("nearbyResults");
+async function findNearbyStops(scope = "arrivals") {
+  const cfg = SEARCH_SCOPES[scope];
+  const container = document.getElementById(cfg.nearby);
   container.classList.remove("hidden");
   container.innerHTML = '<div class="nearby-locating">Locating you...</div>';
 
@@ -2161,12 +2336,12 @@ async function findNearbyStops() {
         container.innerHTML = `
           <div class="nearby-header">
             <h3>Nearest Bus Stops${radius ? ` <span style="font-weight:400;font-size:12px;color:var(--text2);">within ${radius}m</span>` : ""}</h3>
-            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('nearbyResults').classList.add('hidden')">Close</button>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('${cfg.nearby}').classList.add('hidden')">Close</button>
           </div>
           ${nearest
             .map(
               (s) => `
-            <div class="nearby-card" onclick="selectStop('${s.BusStopCode}')">
+            <div class="nearby-card" onclick="selectStop('${s.BusStopCode}','${scope}')">
               <div class="nearby-info">
                 <div class="nearby-name">${escapeHtml(s.Description)}</div>
                 <div class="nearby-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
@@ -2188,15 +2363,16 @@ async function findNearbyStops() {
 
 // If the search box is (or becomes) empty and we already have location
 // permission, surface nearby stops as top suggestions without prompting.
-function handleSearchFocus() {
-  if (!document.getElementById("stopSearch").value.trim()) maybeSuggestNearby();
+function handleSearchFocus(scope = "arrivals") {
+  const cfg = SEARCH_SCOPES[scope];
+  if (!document.getElementById(cfg.input).value.trim()) maybeSuggestNearby(scope);
 }
 
-async function maybeSuggestNearby() {
+async function maybeSuggestNearby(scope = "arrivals") {
   if (!navigator.geolocation || !navigator.permissions || !navigator.permissions.query) return;
   try {
     const status = await navigator.permissions.query({ name: "geolocation" });
-    if (status.state === "granted") findNearbyStops();
+    if (status.state === "granted") findNearbyStops(scope);
   } catch {
     // permissions API unsupported for this query — skip silent auto-suggest
   }
