@@ -1215,6 +1215,16 @@
         el.remove();
         return;
       }
+      // Only play the launch animation once per browser session. A page
+      // refresh during an active session should just reload the data,
+      // not replay the splash.
+      var SESSION_KEY = "bb_sessionStarted";
+      if (window.sessionStorage && sessionStorage.getItem(SESSION_KEY)) {
+        el.remove();
+        window.__hideSplash = function () {};
+        return;
+      }
+      if (window.sessionStorage) sessionStorage.setItem(SESSION_KEY, "1");
       var start = Date.now();
       var MIN_VISIBLE_MS = 1200; // let the run+bump animation play out even on a fast/cached load
       var FALLBACK_MS = 4000; // safety net if app init never signals ready
