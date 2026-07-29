@@ -409,55 +409,127 @@ function switchTab(tab) {
 }
 
 // ── Search ──
-// Shared matcher: filter bus stops by name / road / code.
+// Shared matcher: filter bus stops by name / road / address / code.
+// Addresses ("21 Jurong East St 13") are matched as a set of tokens against
+// the combined name+road+code text, so word order doesn't matter — this is
+// what lets a street/address query find the right stop, not just an exact
+// stop name or code.
 async function searchStops(query, limit = 20) {
   const q = (query || "").trim().toLowerCase();
   if (!q) return [];
+  const tokens = q.split(/\s+/).filter(Boolean);
   const stops = await loadBusStops();
-  return stops
-    .filter(
-      (s) =>
-        s.Description.toLowerCase().includes(q) ||
-        s.RoadName.toLowerCase().includes(q) ||
-        s.BusStopCode.includes(q)
-    )
-    .slice(0, limit);
+  const scored = [];
+  for (const s of stops) {
+    const desc = (s.Description || "").toLowerCase();
+    const road = (s.RoadName || "").toLowerCase();
+    const code = (s.BusStopCode || "").toLowerCase();
+    const hay = `${desc} ${road} ${code}`;
+    if (!tokens.every((t) => hay.includes(t))) continue;
+    let score;
+    if (code === q) score = 0;
+    else if (desc.startsWith(q)) score = 1;
+    else if (road.startsWith(q)) score = 2;
+    else if (desc.includes(q) || road.includes(q)) score = 3;
+    else score = 4; // matched only as separate address tokens
+    scored.push({ stop: s, score });
+  }
+  scored.sort((a, b) => a.score - b.score);
+  return scored.slice(0, limit).map((x) => x.stop);
+}
+
+// Matches bus service numbers (e.g. "965", "NR8", "913A") for the "search by
+// bus number" flow — lets a query like "965" surface the route directly,
+// independent of any bus stop.
+async function searchBusServices(query, limit = 8) {
+  const q = (query || "").trim().toUpperCase();
+  if (!q) return [];
+  const routes = await loadBusRoutes();
+  const seen = new Set();
+  for (const r of routes) {
+    if (r.ServiceNo) seen.add(r.ServiceNo);
+  }
+  const matches = [...seen].filter((no) => no.toUpperCase().includes(q));
+  matches.sort((a, b) => {
+    const au = a.toUpperCase(), bu = b.toUpperCase();
+    const aExact = au === q, bExact = bu === q;
+    if (aExact !== bExact) return aExact ? -1 : 1;
+    const aStarts = au.startsWith(q), bStarts = bu.startsWith(q);
+    if (aStarts !== bStarts) return aStarts ? -1 : 1;
+    return a.localeCompare(b, undefined, { numeric: true });
+  });
+  return matches.slice(0, limit);
 }
 
 let searchDebounce = null;
 async function handleSearch(val) {
   clearTimeout(searchDebounce);
   const container = document.getElementById("searchResults");
-  if (!val || val.length < 2) {
+  const trimmed = (val || "").trim();
+  if (!trimmed) {
+    // Query cleared back to empty while still focused — re-offer nearby
+    // suggestions since no fresh "focus" event fires in that case.
+    container.classList.add("hidden");
+    maybeSuggestNearby();
+    return;
+  }
+  document.getElementById("nearbyResults").classList.add("hidden");
+  if (trimmed.length < 2) {
     container.classList.add("hidden");
     return;
   }
-  if (/^\d{5}$/.test(val.trim())) {
+  if (/^\d{5}$/.test(trimmed)) {
     container.classList.add("hidden");
     return;
   }
   searchDebounce = setTimeout(async () => {
     try {
-      const matches = await searchStops(val, 20);
-      if (matches.length === 0) {
+      const [services, stops] = await Promise.all([
+        searchBusServices(val, 6),
+        searchStops(val, 20),
+      ]);
+      if (services.length === 0 && stops.length === 0) {
         container.innerHTML =
-          '<div class="search-result-item"><span class="search-result-detail">No stops found</span></div>';
+          '<div class="search-result-item"><span class="search-result-detail">No stops or bus services found</span></div>';
       } else {
-        container.innerHTML = matches
-          .map(
-            (s) => `
-          <div class="search-result-item" onclick="selectStop('${s.BusStopCode}')">
-            <div class="search-result-name">${s.Description}</div>
-            <div class="search-result-detail">${s.BusStopCode} &middot; ${s.RoadName}</div>
-          </div>`
-          )
-          .join("");
+        let html = "";
+        if (services.length > 0) {
+          html += `<div class="search-section-label">Bus services</div>`;
+          html += services
+            .map(
+              (no) => `
+            <div class="search-result-item search-result-item-service" onclick="selectService('${escapeHtml(no)}')">
+              <div class="search-result-name">&#128652; Bus ${escapeHtml(no)}</div>
+              <div class="search-result-detail">Tap to view route &amp; stops</div>
+            </div>`
+            )
+            .join("");
+        }
+        if (stops.length > 0) {
+          if (services.length > 0) html += `<div class="search-section-label">Bus stops</div>`;
+          html += stops
+            .map(
+              (s) => `
+            <div class="search-result-item" onclick="selectStop('${s.BusStopCode}')">
+              <div class="search-result-name">${escapeHtml(s.Description)}</div>
+              <div class="search-result-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
+            </div>`
+            )
+            .join("");
+        }
+        container.innerHTML = html;
       }
       container.classList.remove("hidden");
     } catch {
       container.classList.add("hidden");
     }
   }, 300);
+}
+
+function selectService(serviceNo) {
+  document.getElementById("searchResults").classList.add("hidden");
+  document.getElementById("nearbyResults").classList.add("hidden");
+  openRouteStops(serviceNo);
 }
 
 function selectStop(code) {
@@ -2049,6 +2121,10 @@ function locateOnMap() {
 }
 
 // ── Nearby Stops ──
+// Radius bands (metres) tried in order — stop widening as soon as enough
+// stops are found nearby, so "top suggestions" stay genuinely close by.
+const NEARBY_RADII_M = [300, 500, 1000];
+
 async function findNearbyStops() {
   const container = document.getElementById("nearbyResults");
   container.classList.remove("hidden");
@@ -2069,11 +2145,22 @@ async function findNearbyStops() {
           dist: haversine(latitude, longitude, s.Latitude, s.Longitude),
         }));
         withDist.sort((a, b) => a.dist - b.dist);
-        const nearest = withDist.slice(0, 10);
+
+        let radius = null;
+        let nearest = [];
+        for (const r of NEARBY_RADII_M) {
+          nearest = withDist.filter((s) => s.dist <= r);
+          if (nearest.length >= 3) {
+            radius = r;
+            break;
+          }
+        }
+        if (nearest.length === 0) nearest = withDist.slice(0, 5);
+        nearest = nearest.slice(0, 10);
 
         container.innerHTML = `
           <div class="nearby-header">
-            <h3>Nearest Bus Stops</h3>
+            <h3>Nearest Bus Stops${radius ? ` <span style="font-weight:400;font-size:12px;color:var(--text2);">within ${radius}m</span>` : ""}</h3>
             <button class="btn btn-ghost btn-sm" onclick="document.getElementById('nearbyResults').classList.add('hidden')">Close</button>
           </div>
           ${nearest
@@ -2081,8 +2168,8 @@ async function findNearbyStops() {
               (s) => `
             <div class="nearby-card" onclick="selectStop('${s.BusStopCode}')">
               <div class="nearby-info">
-                <div class="nearby-name">${s.Description}</div>
-                <div class="nearby-detail">${s.BusStopCode} &middot; ${s.RoadName}</div>
+                <div class="nearby-name">${escapeHtml(s.Description)}</div>
+                <div class="nearby-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
               </div>
               <div class="nearby-dist">${formatDist(s.dist)}</div>
             </div>`
@@ -2097,6 +2184,22 @@ async function findNearbyStops() {
     },
     { enableHighAccuracy: true, timeout: 10000 }
   );
+}
+
+// If the search box is (or becomes) empty and we already have location
+// permission, surface nearby stops as top suggestions without prompting.
+function handleSearchFocus() {
+  if (!document.getElementById("stopSearch").value.trim()) maybeSuggestNearby();
+}
+
+async function maybeSuggestNearby() {
+  if (!navigator.geolocation || !navigator.permissions || !navigator.permissions.query) return;
+  try {
+    const status = await navigator.permissions.query({ name: "geolocation" });
+    if (status.state === "granted") findNearbyStops();
+  } catch {
+    // permissions API unsupported for this query — skip silent auto-suggest
+  }
 }
 
 function formatDist(m) {
