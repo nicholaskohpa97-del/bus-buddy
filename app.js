@@ -1,3 +1,19 @@
+// Home/Work used to save one fixed bus stop ({code, name}); they now save a
+// geocoded address ({address, postal, latitude, longitude}) so the chip can
+// show stops nearest to that address instead of a single pinned stop. Old
+// entries don't carry coordinates and can't feed that view, so they're
+// dropped — the user re-sets Home/Work via address search.
+function sanitizePlaces(places) {
+  const clean = {};
+  for (const key of Object.keys(places || {})) {
+    const p = places[key];
+    if (p && typeof p.latitude === "number" && typeof p.longitude === "number") {
+      clean[key] = p;
+    }
+  }
+  return clean;
+}
+
 // ── State ──
 let state = {
   apiKey: localStorage.getItem("bb_apiKey") || "",
@@ -7,10 +23,11 @@ let state = {
   departureReminders: JSON.parse(localStorage.getItem("bb_deptReminders") || "[]"),
   dropoffAlerts: JSON.parse(localStorage.getItem("bb_dropoffAlerts") || "[]"),
   modes: JSON.parse(localStorage.getItem("bb_modes") || "[]"),
-  places: JSON.parse(localStorage.getItem("bb_places") || "{}"),
+  places: sanitizePlaces(JSON.parse(localStorage.getItem("bb_places") || "{}")),
   busStops: null,
   currentStop: null,
 };
+localStorage.setItem("bb_places", JSON.stringify(state.places));
 
 let refreshTimer = null;
 let deptCheckTimer = null;
@@ -125,6 +142,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   document
     .querySelectorAll("[data-stop-autocomplete]")
     .forEach(attachStopAutocomplete);
+  document
+    .querySelectorAll("[data-address-autocomplete]")
+    .forEach(attachAddressAutocomplete);
   renderFavourites();
   renderDepartureReminders();
   renderDropoffAlerts();
@@ -334,6 +354,18 @@ async function getRouteStops(serviceNo, direction) {
     .filter((r) => r.stop && r.stop.Latitude && r.stop.Longitude);
 }
 
+// All service numbers scheduled to serve a stop, per the static route map —
+// used to show services with no live arrival as "not currently running"
+// rather than omitting them entirely.
+async function getServicesForStop(stopCode) {
+  const routes = await loadBusRoutes();
+  const seen = new Set();
+  for (const r of routes) {
+    if (r.BusStopCode === stopCode) seen.add(r.ServiceNo);
+  }
+  return [...seen].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
 // ── Stop classification: bus interchanges & MRT/LRT-connected stops ──
 // SG bus-stop Descriptions name station stops "…Stn" and interchanges "…Int".
 // We derive station locations from those, then also flag nearby stops by
@@ -472,20 +504,25 @@ function isPostalCode(q) {
 // be ranked by actual distance rather than just text matching. Small
 // same-session cache avoids re-hitting the network for repeated queries.
 const geocodeCache = new Map();
-async function geocodeAddress(query) {
+async function geocodeSearch(query, limit = 5) {
   const q = (query || "").trim();
-  if (!q) return null;
+  if (!q) return [];
   if (geocodeCache.has(q)) return geocodeCache.get(q);
   try {
     const res = await fetch(`/api/geocode?q=${encodeURIComponent(q)}`);
     if (!res.ok) throw new Error(`geocode ${res.status}`);
     const data = await res.json();
-    const result = (data.results && data.results[0]) || null;
-    geocodeCache.set(q, result);
-    return result;
+    const results = (data.results || []).slice(0, limit);
+    geocodeCache.set(q, results);
+    return results;
   } catch {
-    return null; // not cached — a transient failure shouldn't stick
+    return []; // not cached — a transient failure shouldn't stick
   }
+}
+
+async function geocodeAddress(query) {
+  const results = await geocodeSearch(query, 1);
+  return results[0] || null;
 }
 
 // Bus stops within `limit` of a lat/lng, nearest first.
@@ -648,6 +685,7 @@ function attachStopAutocomplete(input) {
   input.setAttribute("autocomplete", "off");
 
   let matches = [];
+  let emptyMessage = "No stops found";
   let active = -1;
   let debounce = null;
 
@@ -683,15 +721,23 @@ function attachStopAutocomplete(input) {
 
   const render = () => {
     if (matches.length === 0) {
-      list.innerHTML =
-        '<div class="search-result-item"><span class="search-result-detail">No stops found</span></div>';
+      list.innerHTML = `<div class="search-result-item"><span class="search-result-detail">${escapeHtml(emptyMessage)}</span></div>`;
     } else {
       list.innerHTML = matches
         .map(
           (s, i) => `
-        <div class="search-result-item" role="option" id="${list.id}-o${i}" data-i="${i}">
-          <div class="search-result-name">${escapeHtml(s.Description)}</div>
-          <div class="search-result-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
+        ${s.sectionLabel ? `<div class="search-section-label">${escapeHtml(s.sectionLabel)}</div>` : ""}
+        <div class="search-result-item${s.dist != null ? " search-result-item--dist" : ""}" role="option" id="${list.id}-o${i}" data-i="${i}">
+          ${s.dist != null ? `
+            <div>
+              <div class="search-result-name">${escapeHtml(s.Description)}</div>
+              <div class="search-result-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
+            </div>
+            <span class="search-result-dist">${formatDist(s.dist)}</span>
+          ` : `
+            <div class="search-result-name">${escapeHtml(s.Description)}</div>
+            <div class="search-result-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
+          `}
         </div>`
         )
         .join("");
@@ -707,6 +753,8 @@ function attachStopAutocomplete(input) {
     active = -1;
   };
 
+  // Same code / name / postal-code / address capability as the main search
+  // bars, so every bus-stop picker in the app behaves identically.
   input.addEventListener("input", () => {
     clearTimeout(debounce);
     const val = input.value.trim();
@@ -716,12 +764,161 @@ function attachStopAutocomplete(input) {
     }
     debounce = setTimeout(async () => {
       try {
-        matches = await searchStops(val, 8);
+        const postal = isPostalCode(val);
+        const pureNumeric = /^\d+$/.test(val);
+        const shouldGeocode = postal || (!pureNumeric && val.length >= 4);
+        const [stops, geo] = await Promise.all([
+          postal ? [] : searchStops(val, 8),
+          shouldGeocode ? geocodeAddress(val) : null,
+        ]);
+
+        let near = [];
+        if (geo) near = await stopsNear(geo.latitude, geo.longitude, 6);
+        const nearCodes = new Set(near.map((s) => s.BusStopCode));
+        const otherStops = stops.filter((s) => !nearCodes.has(s.BusStopCode));
+
+        matches = [];
+        if (near.length > 0) {
+          const label = `Near ${geo.address || val}`;
+          near.forEach((s, i) => matches.push({ ...s, sectionLabel: i === 0 ? label : undefined }));
+        }
+        otherStops.forEach((s, i) =>
+          matches.push({ ...s, sectionLabel: i === 0 && near.length > 0 ? "Matching stops" : undefined })
+        );
+        emptyMessage = postal ? `No location found for postal code ${val}` : "No stops found";
         render();
       } catch {
         close();
       }
     }, 250);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (list.classList.contains("hidden") || matches.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      highlight((active + 1) % matches.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      highlight((active - 1 + matches.length) % matches.length);
+    } else if (e.key === "Enter") {
+      if (active >= 0) {
+        e.preventDefault();
+        choose(active);
+      }
+    } else if (e.key === "Escape") {
+      close();
+    }
+  });
+
+  input.addEventListener("blur", () => setTimeout(close, 150));
+}
+
+// ── Address autocomplete (Home/Work — resolves to a geocoded address+coords,
+// not a specific bus stop, since Home/Work now show nearby stops instead of
+// pinning one fixed stop) ──
+let addressAcId = 0;
+function attachAddressAutocomplete(input) {
+  if (!input || input.dataset.acReady) return;
+  input.dataset.acReady = "1";
+
+  const wrap = document.createElement("div");
+  wrap.className = "stop-ac-wrap";
+  input.parentNode.insertBefore(wrap, input);
+  wrap.appendChild(input);
+
+  const list = document.createElement("div");
+  list.className = "stop-suggest hidden";
+  list.id = `addrAc${++addressAcId}`;
+  list.setAttribute("role", "listbox");
+  wrap.appendChild(list);
+
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-autocomplete", "list");
+  input.setAttribute("aria-expanded", "false");
+  input.setAttribute("aria-controls", list.id);
+  input.setAttribute("autocomplete", "off");
+
+  let matches = [];
+  let active = -1;
+  let debounce = null;
+
+  const close = () => {
+    list.classList.add("hidden");
+    list.innerHTML = "";
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    active = -1;
+  };
+
+  const choose = (i) => {
+    const m = matches[i];
+    if (!m) return;
+    input.value = m.address || input.value;
+    input.dataset.lat = m.latitude;
+    input.dataset.lng = m.longitude;
+    input.dataset.postal = m.postal || "";
+    input.dataset.resolvedFor = input.value;
+    close();
+    input.focus();
+  };
+
+  const highlight = (i) => {
+    active = i;
+    [...list.children].forEach((el, idx) => {
+      const on = idx === active;
+      el.classList.toggle("active", on);
+      if (on) {
+        input.setAttribute("aria-activedescendant", el.id);
+        el.scrollIntoView({ block: "nearest" });
+      }
+    });
+  };
+
+  const render = () => {
+    if (matches.length === 0) {
+      list.innerHTML = '<div class="search-result-item"><span class="search-result-detail">No matching address</span></div>';
+    } else {
+      list.innerHTML = matches
+        .map(
+          (m, i) => `
+        <div class="search-result-item" role="option" id="${list.id}-o${i}" data-i="${i}">
+          <div class="search-result-name">${escapeHtml(m.address || "")}</div>
+          ${m.postal ? `<div class="search-result-detail">Postal ${escapeHtml(m.postal)}</div>` : ""}
+        </div>`
+        )
+        .join("");
+      [...list.querySelectorAll("[data-i]")].forEach((el) => {
+        el.addEventListener("mousedown", (e) => {
+          e.preventDefault();
+          choose(parseInt(el.dataset.i));
+        });
+      });
+    }
+    list.classList.remove("hidden");
+    input.setAttribute("aria-expanded", "true");
+    active = -1;
+  };
+
+  input.addEventListener("input", () => {
+    delete input.dataset.lat;
+    delete input.dataset.lng;
+    delete input.dataset.postal;
+    delete input.dataset.resolvedFor;
+    clearTimeout(debounce);
+    const val = input.value.trim();
+    if (val.length < 3) {
+      close();
+      return;
+    }
+    debounce = setTimeout(async () => {
+      try {
+        matches = await geocodeSearch(val, 6);
+        render();
+      } catch {
+        close();
+      }
+    }, 300);
   });
 
   input.addEventListener("keydown", (e) => {
@@ -788,13 +985,29 @@ async function loadArrivals(stopCode) {
   const container = document.getElementById("arrivalResults");
   container.innerHTML = arrivalSkeleton();
   try {
-    const data = await fetchArrivals(stopCode);
+    const [data, knownServices] = await Promise.all([
+      fetchArrivals(stopCode),
+      getServicesForStop(stopCode).catch(() => []),
+    ]);
     state.currentStop = stopCode;
 
     const stopName = await getStopName(stopCode);
     const isFav = state.favourites.some((f) => f.code === stopCode);
 
-    if (!data.Services || data.Services.length === 0) {
+    const liveByNo = new Map();
+    (data.Services || []).forEach((svc) => {
+      const times = [svc.NextBus, svc.NextBus2, svc.NextBus3].map((b) => parseBusArrival(b));
+      liveByNo.set(svc.ServiceNo, { no: svc.ServiceNo, times });
+    });
+
+    const activeServices = [...liveByNo.values()].sort((a, b) => {
+      const aMin = Math.min(...a.times.map((t) => t.min ?? 999));
+      const bMin = Math.min(...b.times.map((t) => t.min ?? 999));
+      return aMin - bMin;
+    });
+    const inactiveServices = knownServices.filter((no) => !liveByNo.has(no));
+
+    if (activeServices.length === 0 && inactiveServices.length === 0) {
       container.innerHTML = `
         <div class="card">
           <div class="bus-stop-header">
@@ -809,19 +1022,6 @@ async function loadArrivals(stopCode) {
       return;
     }
 
-    const services = data.Services.map((svc) => {
-      const times = [svc.NextBus, svc.NextBus2, svc.NextBus3].map((b) =>
-        parseBusArrival(b)
-      );
-      return { no: svc.ServiceNo, times };
-    });
-
-    services.sort((a, b) => {
-      const aMin = Math.min(...a.times.map((t) => t.min ?? 999));
-      const bMin = Math.min(...b.times.map((t) => t.min ?? 999));
-      return aMin - bMin;
-    });
-
     container.innerHTML = `
       <div class="card">
         <div class="bus-stop-header">
@@ -834,7 +1034,12 @@ async function loadArrivals(stopCode) {
             <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${escapeHtml(stopName)}')" title="Favourite">&#9733;</button>
           </div>
         </div>
-        ${services.map((svc) => renderServiceRow(svc, stopCode)).join("")}
+        ${activeServices.length === 0 ? '<div class="empty-state" style="padding:16px 0;"><p>No bus services at this time.</p></div>' : ""}
+        ${activeServices.map((svc) => renderServiceRow(svc, stopCode)).join("")}
+        ${inactiveServices.length > 0 ? `
+          <div class="service-inactive-label">Not currently running</div>
+          ${inactiveServices.map((no) => renderInactiveServiceRow(no, stopCode)).join("")}
+        ` : ""}
       </div>`;
   } catch (err) {
     container.innerHTML = `
@@ -911,6 +1116,18 @@ function renderServiceRow(svc, stopCode) {
       <div class="service-actions">
         <button class="icon-btn" onclick="quickDeptReminder('${stopCode}','${svc.no}')" title="Remind me" aria-label="Set reminder for bus ${svc.no}">&#128276;</button>
       </div>
+    </div>`;
+}
+
+// A service known to serve this stop (from the static route map) but with
+// no live arrival right now — shown greyed out rather than hidden, so the
+// full roster of routes is always visible.
+function renderInactiveServiceRow(serviceNo, stopCode) {
+  return `
+    <div class="service-row service-row--inactive">
+      <button class="service-number" onclick="event.stopPropagation();openRouteStops('${serviceNo}','${stopCode}')" aria-label="View stops for bus ${serviceNo}">${serviceNo}</button>
+      <div class="arrival-times"><span class="arrival-badge na"><span class="time-text">Not running</span></span></div>
+      <div class="service-actions"></div>
     </div>`;
 }
 
@@ -1001,14 +1218,14 @@ function renderPlaces() {
     .map((key) => {
       const meta = PLACE_META[key];
       const place = state.places[key];
-      if (place && place.code) {
+      if (place && place.address) {
         return `
-          <button class="place-chip place-chip--set" onclick="goToStop('${place.code}')"
-                  aria-label="${meta.label}: ${escapeHtml(place.name)}, view arrivals">
+          <button class="place-chip place-chip--set" onclick="openPlaceNearby('${key}')"
+                  aria-label="${meta.label}: ${escapeHtml(place.address)}, view nearby stops">
             <span class="place-chip-icon" aria-hidden="true">${meta.icon}</span>
             <span class="place-chip-body">
               <span class="place-chip-label">${meta.label}</span>
-              <span class="place-chip-name">${place.name}</span>
+              <span class="place-chip-name">${escapeHtml(place.address)}</span>
             </span>
             <span class="place-chip-edit" onclick="event.stopPropagation();openPlaceModal('${key}')"
                   role="button" aria-label="Edit ${meta.label}" title="Edit">✎</span>
@@ -1016,7 +1233,7 @@ function renderPlaces() {
       }
       return `
         <button class="place-chip place-chip--empty" onclick="openPlaceModal('${key}')"
-                aria-label="Set ${meta.label} stop">
+                aria-label="Set ${meta.label} address">
           <span class="place-chip-icon" aria-hidden="true">${meta.icon}</span>
           <span class="place-chip-body">
             <span class="place-chip-label">${meta.label}</span>
@@ -1035,35 +1252,55 @@ async function openPlaceModal(key) {
   const meta = PLACE_META[key];
   document.getElementById("placeModalTitle").textContent = `Set ${meta.label}`;
   const existing = state.places[key];
-  document.getElementById("placeStopInput").value = existing?.code || "";
+  const input = document.getElementById("placeStopInput");
+  input.value = existing?.address || "";
+  delete input.dataset.lat;
+  delete input.dataset.lng;
+  delete input.dataset.postal;
+  delete input.dataset.resolvedFor;
+  if (existing) {
+    input.dataset.lat = existing.latitude;
+    input.dataset.lng = existing.longitude;
+    input.dataset.postal = existing.postal || "";
+    input.dataset.resolvedFor = existing.address;
+  }
   document.getElementById("placeModal").classList.remove("hidden");
   const removeBtn = document.getElementById("placeRemoveBtn");
-  removeBtn.style.display = existing?.code ? "" : "none";
+  removeBtn.style.display = existing ? "" : "none";
   focusFirstInput("placeModal");
 }
 
 async function savePlace() {
   if (!editingPlaceKey) return;
-  const input = document.getElementById("placeStopInput").value.trim();
-  if (!input) {
-    showToast("Enter a bus stop code or name");
+  const input = document.getElementById("placeStopInput");
+  const query = input.value.trim();
+  if (!query) {
+    showToast("Enter an address or postal code");
     return;
   }
-  let code = input;
-  if (!/^\d{5}$/.test(input)) {
-    const stops = await loadBusStops();
-    const match = stops.find(
-      (s) => s.Description.toLowerCase() === input.toLowerCase()
-    );
-    if (match) code = match.BusStopCode;
+
+  let geo;
+  if (input.dataset.lat && input.dataset.resolvedFor === query) {
+    geo = { address: query, postal: input.dataset.postal, latitude: parseFloat(input.dataset.lat), longitude: parseFloat(input.dataset.lng) };
+  } else {
+    geo = await geocodeAddress(query);
   }
-  const name = await getStopName(code);
-  state.places[editingPlaceKey] = { code, name };
+  if (!geo) {
+    showToast("Couldn't find that address — try a postal code or a more specific road name");
+    return;
+  }
+
+  state.places[editingPlaceKey] = {
+    address: geo.address || query,
+    postal: geo.postal || "",
+    latitude: geo.latitude,
+    longitude: geo.longitude,
+  };
   localStorage.setItem("bb_places", JSON.stringify(state.places));
   document.getElementById("placeModal").classList.add("hidden");
   renderPlaces();
   syncPrefs();
-  showToast(`${PLACE_META[editingPlaceKey].label} set to ${name}`);
+  showToast(`${PLACE_META[editingPlaceKey].label} set to ${state.places[editingPlaceKey].address}`);
 }
 
 function removePlace() {
@@ -1073,6 +1310,42 @@ function removePlace() {
   document.getElementById("placeModal").classList.add("hidden");
   renderPlaces();
   syncPrefs();
+}
+
+// ── Home/Work "nearby stops" full-screen view ──
+// Tapping a Home/Work chip doesn't jump to one fixed stop anymore — it opens
+// the bus stops closest to that saved address, ranked by distance, so it
+// stays useful even if the nearest stop to your door changes.
+async function openPlaceNearby(key) {
+  const place = state.places[key];
+  if (!place) return;
+  const meta = PLACE_META[key];
+  document.getElementById("placeNearbyTitle").textContent = `${meta.icon} ${meta.label}`;
+  document.getElementById("placeNearbySub").textContent = place.address;
+  document.getElementById("placeNearbyList").innerHTML = '<div class="nearby-locating">Finding nearby stops...</div>';
+  document.getElementById("placeNearbyModal").classList.remove("hidden");
+
+  try {
+    const nearest = await stopsNear(place.latitude, place.longitude, 10);
+    document.getElementById("placeNearbyList").innerHTML = nearest
+      .map(
+        (s) => `
+      <div class="nearby-card" onclick="closePlaceNearby();selectStop('${s.BusStopCode}')">
+        <div class="nearby-info">
+          <div class="nearby-name">${escapeHtml(s.Description)}</div>
+          <div class="nearby-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
+        </div>
+        <div class="nearby-dist">${formatDist(s.dist)}</div>
+      </div>`
+      )
+      .join("");
+  } catch {
+    document.getElementById("placeNearbyList").innerHTML = '<div class="nearby-locating">Couldn\'t load nearby stops.</div>';
+  }
+}
+
+function closePlaceNearby() {
+  document.getElementById("placeNearbyModal").classList.add("hidden");
 }
 
 // ── Departure Reminders ──
@@ -2682,7 +2955,7 @@ async function restorePrefs() {
       remote.places &&
       Object.keys(remote.places).length
     ) {
-      state.places = remote.places;
+      state.places = sanitizePlaces(remote.places);
       localStorage.setItem("bb_places", JSON.stringify(state.places));
       changed = true;
     }
@@ -2784,27 +3057,30 @@ async function onboardingEnableAlerts() {
 }
 
 async function onboardingSavePlaces() {
-  const home = document.getElementById("onbHomeInput").value.trim();
-  const work = document.getElementById("onbWorkInput").value.trim();
-  if (home) await setPlaceFromInput("home", home);
-  if (work) await setPlaceFromInput("work", work);
+  await setPlaceFromInput("home", document.getElementById("onbHomeInput"));
+  await setPlaceFromInput("work", document.getElementById("onbWorkInput"));
   finishOnboarding();
 }
 
-// Resolve a code-or-name input into a stored place (shared by onboarding).
+// Resolve an address input into a stored place (shared by onboarding).
+// Reuses whatever attachAddressAutocomplete already resolved for this exact
+// text, falling back to a fresh geocode otherwise.
 async function setPlaceFromInput(key, input) {
-  let code = input;
-  if (!/^\d{5}$/.test(input)) {
-    try {
-      const stops = await loadBusStops();
-      const match = stops.find(
-        (s) => s.Description.toLowerCase() === input.toLowerCase()
-      );
-      if (match) code = match.BusStopCode;
-    } catch {}
+  const query = input.value.trim();
+  if (!query) return;
+  let geo;
+  if (input.dataset.lat && input.dataset.resolvedFor === query) {
+    geo = { address: query, postal: input.dataset.postal, latitude: parseFloat(input.dataset.lat), longitude: parseFloat(input.dataset.lng) };
+  } else {
+    geo = await geocodeAddress(query);
   }
-  const name = await getStopName(code);
-  state.places[key] = { code, name };
+  if (!geo) return;
+  state.places[key] = {
+    address: geo.address || query,
+    postal: geo.postal || "",
+    latitude: geo.latitude,
+    longitude: geo.longitude,
+  };
   localStorage.setItem("bb_places", JSON.stringify(state.places));
 }
 
