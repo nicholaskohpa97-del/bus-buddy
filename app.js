@@ -354,16 +354,80 @@ async function getRouteStops(serviceNo, direction) {
     .filter((r) => r.stop && r.stop.Latitude && r.stop.Longitude);
 }
 
-// All service numbers scheduled to serve a stop, per the static route map —
-// used to show services with no live arrival as "not currently running"
-// rather than omitting them entirely.
-async function getServicesForStop(stopCode) {
+// Route-map row (incl. WD_/SAT_/SUN_ First/LastBus) per service at a stop —
+// used both to show services with no live arrival as "not currently
+// running" instead of being omitted, and to display/highlight scheduled
+// first & last bus times. BusRoutes is LTA's only source for these; there
+// is no separate "first/last bus" endpoint.
+async function getStopRouteInfo(stopCode) {
   const routes = await loadBusRoutes();
-  const seen = new Set();
+  const map = new Map();
   for (const r of routes) {
-    if (r.BusStopCode === stopCode) seen.add(r.ServiceNo);
+    if (r.BusStopCode === stopCode && !map.has(r.ServiceNo)) {
+      map.set(r.ServiceNo, r);
+    }
   }
-  return [...seen].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  return map;
+}
+
+async function getServicesForStop(stopCode) {
+  const map = await getStopRouteInfo(stopCode);
+  return [...map.keys()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+// ── Scheduled first/last bus (from BusRoutes WD_/SAT_/SUN_ First/LastBus) ──
+// LTA publishes weekday / Saturday / Sunday bands only — public holidays
+// aren't separately flagged in this dataset, so they fall back to whichever
+// day-of-week they land on.
+function hhmmToMinutes(hhmm) {
+  if (hhmm === undefined || hhmm === null || hhmm === "") return null;
+  const s = String(hhmm).padStart(4, "0");
+  const h = parseInt(s.slice(0, 2), 10);
+  const m = parseInt(s.slice(2), 10);
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return h * 60 + m;
+}
+
+function hhmmToDisplay(hhmm) {
+  const mins = hhmmToMinutes(hhmm);
+  if (mins === null) return null;
+  const h = String(Math.floor(mins / 60) % 24).padStart(2, "0");
+  const m = String(mins % 60).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+function todayScheduleKey() {
+  const day = new Date().getDay(); // 0 = Sun, 6 = Sat
+  if (day === 0) return "SUN";
+  if (day === 6) return "SAT";
+  return "WD";
+}
+
+// { firstMin, lastMin, firstDisp, lastDisp } for today's day-type, or all
+// null if this service/stop combo has no schedule data.
+function todaySchedule(routeRow) {
+  if (!routeRow) return { firstMin: null, lastMin: null, firstDisp: null, lastDisp: null };
+  const key = todayScheduleKey();
+  const firstRaw = routeRow[`${key}_FirstBus`];
+  const lastRaw = routeRow[`${key}_LastBus`];
+  return {
+    firstMin: hhmmToMinutes(firstRaw),
+    lastMin: hhmmToMinutes(lastRaw),
+    firstDisp: hhmmToDisplay(firstRaw),
+    lastDisp: hhmmToDisplay(lastRaw),
+  };
+}
+
+// Real-time predictions drift a few minutes from the static schedule, so a
+// live arrival within this window of the scheduled last-bus time counts as
+// "the last bus" rather than requiring an exact match.
+const LAST_BUS_TOLERANCE_MIN = 10;
+
+function isLastBusArrival(estimatedArrivalIso, lastBusMinutes) {
+  if (!estimatedArrivalIso || lastBusMinutes === null) return false;
+  const d = new Date(estimatedArrivalIso);
+  const arrivalMinutes = d.getHours() * 60 + d.getMinutes();
+  return Math.abs(arrivalMinutes - lastBusMinutes) <= LAST_BUS_TOLERANCE_MIN;
 }
 
 // ── Stop classification: bus interchanges & MRT/LRT-connected stops ──
@@ -985,9 +1049,9 @@ async function loadArrivals(stopCode) {
   const container = document.getElementById("arrivalResults");
   container.innerHTML = arrivalSkeleton();
   try {
-    const [data, knownServices] = await Promise.all([
+    const [data, routeInfo] = await Promise.all([
       fetchArrivals(stopCode),
-      getServicesForStop(stopCode).catch(() => []),
+      getStopRouteInfo(stopCode).catch(() => new Map()),
     ]);
     state.currentStop = stopCode;
 
@@ -1005,7 +1069,9 @@ async function loadArrivals(stopCode) {
       const bMin = Math.min(...b.times.map((t) => t.min ?? 999));
       return aMin - bMin;
     });
-    const inactiveServices = knownServices.filter((no) => !liveByNo.has(no));
+    const inactiveServices = [...routeInfo.keys()]
+      .filter((no) => !liveByNo.has(no))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
     if (activeServices.length === 0 && inactiveServices.length === 0) {
       container.innerHTML = `
@@ -1035,10 +1101,10 @@ async function loadArrivals(stopCode) {
           </div>
         </div>
         ${activeServices.length === 0 ? '<div class="empty-state" style="padding:16px 0;"><p>No bus services at this time.</p></div>' : ""}
-        ${activeServices.map((svc) => renderServiceRow(svc, stopCode)).join("")}
+        ${activeServices.map((svc) => renderServiceRow(svc, stopCode, routeInfo.get(svc.no))).join("")}
         ${inactiveServices.length > 0 ? `
           <div class="service-inactive-label">Not currently running</div>
-          ${inactiveServices.map((no) => renderInactiveServiceRow(no, stopCode)).join("")}
+          ${inactiveServices.map((no) => renderInactiveServiceRow(no, stopCode, routeInfo.get(no))).join("")}
         ` : ""}
       </div>`;
   } catch (err) {
@@ -1090,28 +1156,38 @@ function loadClass(code) {
   return "";
 }
 
-function renderServiceRow(svc, stopCode) {
+// routeRow (optional) supplies today's scheduled first/last bus for this
+// service at this stop, from BusRoutes — used to show that schedule under
+// the service number and to flag whichever live arrival is the last bus.
+function renderServiceRow(svc, stopCode, routeRow) {
+  const sched = todaySchedule(routeRow);
   const badges = svc.times
     .map((t) => {
       const cls = badgeClass(t.min);
       if (t.min === null) {
         return '<span class="arrival-badge na"><span class="time-text">-</span></span>';
       }
+      const isLast = isLastBusArrival(t.arrival, sched.lastMin);
       const metaParts = [];
       if (t.feature === "WAB")
         metaParts.push('<span class="wab" title="Wheelchair accessible">&#9855;</span>');
       if (t.load) metaParts.push(t.load);
+      if (isLast) metaParts.push('<span class="last-bus-tag">Last bus</span>');
       const meta = metaParts.length
         ? `<span class="badge-meta ${loadClass(t.loadCode)}">${metaParts.join(" ")}</span>`
         : "";
       const dataAttr = t.arrival ? ` data-arrival="${t.arrival}"` : "";
-      return `<span class="arrival-badge ${cls}"${dataAttr}><span class="time-text">${badgeLabel(t.min)}</span>${meta}</span>`;
+      const cssCls = isLast ? `${cls} last-bus` : cls;
+      return `<span class="arrival-badge ${cssCls}"${dataAttr}><span class="time-text">${badgeLabel(t.min)}</span>${meta}</span>`;
     })
     .join("");
 
   return `
     <div class="service-row">
-      <button class="service-number" onclick="event.stopPropagation();openRouteStops('${svc.no}','${stopCode}')" aria-label="View stops for bus ${svc.no}">${svc.no}</button>
+      <div class="service-number-wrap">
+        <button class="service-number" onclick="event.stopPropagation();openRouteStops('${svc.no}','${stopCode}')" aria-label="View stops for bus ${svc.no}">${svc.no}</button>
+        ${scheduleLineHtml(sched)}
+      </div>
       <div class="arrival-times">${badges}</div>
       <div class="service-actions">
         <button class="icon-btn" onclick="quickDeptReminder('${stopCode}','${svc.no}')" title="Remind me" aria-label="Set reminder for bus ${svc.no}">&#128276;</button>
@@ -1119,14 +1195,37 @@ function renderServiceRow(svc, stopCode) {
     </div>`;
 }
 
+// "First HH:MM · Last HH:MM" line shown under a service number, when known.
+function scheduleLineHtml(sched) {
+  if (sched.firstDisp === null && sched.lastDisp === null) return "";
+  const parts = [];
+  if (sched.firstDisp !== null) parts.push(`First ${sched.firstDisp}`);
+  if (sched.lastDisp !== null) parts.push(`Last ${sched.lastDisp}`);
+  return `<div class="service-schedule">${parts.join(" &middot; ")}</div>`;
+}
+
 // A service known to serve this stop (from the static route map) but with
 // no live arrival right now — shown greyed out rather than hidden, so the
-// full roster of routes is always visible.
-function renderInactiveServiceRow(serviceNo, stopCode) {
+// full roster of routes is always visible. routeRow lets us explain *why*
+// it's inactive: already past today's last bus, or not started yet.
+function renderInactiveServiceRow(serviceNo, stopCode, routeRow) {
+  const sched = todaySchedule(routeRow);
+  const nowMin = new Date().getHours() * 60 + new Date().getMinutes();
+  let status = "Not running";
+  let ended = false;
+  if (sched.lastMin !== null && nowMin > sched.lastMin) {
+    status = `Last bus was ${sched.lastDisp}`;
+    ended = true;
+  } else if (sched.firstMin !== null && nowMin < sched.firstMin) {
+    status = `First bus at ${sched.firstDisp}`;
+  }
   return `
     <div class="service-row service-row--inactive">
-      <button class="service-number" onclick="event.stopPropagation();openRouteStops('${serviceNo}','${stopCode}')" aria-label="View stops for bus ${serviceNo}">${serviceNo}</button>
-      <div class="arrival-times"><span class="arrival-badge na"><span class="time-text">Not running</span></span></div>
+      <div class="service-number-wrap">
+        <button class="service-number" onclick="event.stopPropagation();openRouteStops('${serviceNo}','${stopCode}')" aria-label="View stops for bus ${serviceNo}">${serviceNo}</button>
+        ${scheduleLineHtml(sched)}
+      </div>
+      <div class="arrival-times"><span class="arrival-badge na${ended ? " last-bus" : ""}"><span class="time-text">${escapeHtml(status)}</span></span></div>
       <div class="service-actions"></div>
     </div>`;
 }
@@ -2059,7 +2158,7 @@ async function dashLoadStop(stopCode) {
   }
 }
 
-function renderDashArrivals(stopCode, data) {
+async function renderDashArrivals(stopCode, data) {
   const container = document.getElementById(`dash-arrivals-${stopCode}`);
   if (!container) return;
 
@@ -2090,8 +2189,10 @@ function renderDashArrivals(stopCode, data) {
 
   const shown = services.slice(0, DASH_MAX_SERVICES);
   const remaining = services.length - DASH_MAX_SERVICES;
+  const routeInfo = await getStopRouteInfo(stopCode).catch(() => new Map());
+  if (!document.getElementById(`dash-arrivals-${stopCode}`)) return; // navigated away meanwhile
 
-  container.innerHTML = shown.map(svc => renderServiceRow(svc, stopCode)).join("")
+  container.innerHTML = shown.map(svc => renderServiceRow(svc, stopCode, routeInfo.get(svc.no))).join("")
     + (remaining > 0
       ? `<div class="dash-more-link" onclick="goToStop('${stopCode}')">+${remaining} more service${remaining > 1 ? 's' : ''} &rsaquo;</div>`
       : "");
@@ -2527,7 +2628,10 @@ async function openRouteStopDetail(code) {
 
   // Load live arrivals into the detail view, reusing the arrivals renderer.
   try {
-    const data = await fetchArrivals(code);
+    const [data, routeInfo] = await Promise.all([
+      fetchArrivals(code),
+      getStopRouteInfo(code).catch(() => new Map()),
+    ]);
     const target = document.getElementById("routeStopDetailArrivals");
     if (!target) return; // user navigated away
     if (!data.Services || data.Services.length === 0) {
@@ -2543,7 +2647,7 @@ async function openRouteStopDetail(code) {
       const bMin = Math.min(...b.times.map((t) => t.min ?? 999));
       return aMin - bMin;
     });
-    target.innerHTML = services.map((svc) => renderServiceRow(svc, code)).join("");
+    target.innerHTML = services.map((svc) => renderServiceRow(svc, code, routeInfo.get(svc.no))).join("");
   } catch {
     const target = document.getElementById("routeStopDetailArrivals");
     if (target) target.innerHTML = `<div class="empty-state"><p>Couldn't load arrivals.</p></div>`;
