@@ -528,6 +528,25 @@
     .planner-credit { font-size: 11px; color: var(--text2); margin-top: 14px; }
     .oneshot-eta { color: var(--text2); font-size: 13px; }
 
+    /* ── Rail ── */
+    .map-rail-btn { top: 130px; font-size: 18px; line-height: 1; }
+    .map-rail-btn.active { background: var(--accent); color: #fff; }
+    .alert-lines { display: flex; flex-direction: column; gap: 6px; }
+    .alert-line {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .alert-line input { width: auto; margin: 0; }
+    .alert-line-swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 4px;
+      flex: 0 0 auto;
+    }
+
     /* ── Recent searches ── */
     .recent-header {
       display: flex;
@@ -1638,7 +1657,10 @@
       <div class="dash-section">
         <div class="dash-section-header">
           <h3>Journey Modes</h3>
-          <button class="btn btn-ghost btn-sm" onclick="openPlanner()">Plan a trip</button>
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-ghost btn-sm" onclick="openMrtPlanner()">&#128645; Train</button>
+            <button class="btn btn-ghost btn-sm" onclick="openPlanner()">Plan a trip</button>
+          </div>
         </div>
         <div id="dashModes"></div>
         <div id="dashModesEmpty" class="empty-state hidden">
@@ -1711,6 +1733,7 @@
         <button class="map-locate-btn" onclick="locateOnMap()" title="Find my location">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
         </button>
+        <button class="map-locate-btn map-rail-btn" id="mrtToggle" onclick="toggleMrtLayer()" title="Show rail network" aria-pressed="false" aria-label="Toggle rail network">&#128645;</button>
       </div>
     </div>
 
@@ -1843,6 +1866,14 @@
         </p>
       </div>
       <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">
+        <label>Rail disruption alerts</label>
+        <p style="font-size:12px;color:var(--text2);margin:4px 0 8px;">Pushed when LTA reports a disruption on a line you follow, and again when service is restored. Defaults to the lines near your favourite stops.</p>
+        <div id="alertLinesList" class="alert-lines"></div>
+        <p style="font-size:12px;color:var(--text2);margin-top:10px;">
+          <strong>Bus disruptions aren't covered.</strong> LTA publishes no bus-disruption feed &mdash; there is no official source to alert from. The operators announce them on social media only, which isn't something Bus Buddy can rely on, so it doesn't pretend to.
+        </p>
+      </div>
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">
         <label>Bus Stop Database</label>
         <div style="font-size:13px;color:var(--text2);margin-top:4px;" id="busStopCacheInfo">Checking cache...</div>
         <button class="btn btn-ghost btn-sm" onclick="refreshBusStopsCache()" style="margin-top:8px;">&#8635; Refresh bus stop database</button>
@@ -1945,6 +1976,24 @@
           <button class="btn" onclick="startPlannedJourney()">Start journey</button>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- MRT STATION PLANNER -->
+  <div id="mrtModal" class="modal-overlay hidden" onclick="closeModal(event, 'mrtModal')" role="dialog" aria-modal="true" aria-labelledby="mrtTitle">
+    <div class="modal modal-tall" onclick="event.stopPropagation()">
+      <h3 id="mrtTitle">&#128645; Train route &amp; fare</h3>
+      <datalist id="mrtStationList"></datalist>
+      <label for="mrtFrom">From station</label>
+      <input type="text" id="mrtFrom" list="mrtStationList" placeholder="e.g. Sengkang" autocomplete="off">
+      <label for="mrtTo">To station</label>
+      <input type="text" id="mrtTo" list="mrtStationList" placeholder="e.g. Jurong East" autocomplete="off">
+      <div class="modal-actions" style="margin-top:14px;">
+        <button class="btn btn-ghost" onclick="closeMrtPlanner()">Close</button>
+        <button class="btn" onclick="planMrtJourney()">Find route</button>
+      </div>
+      <div id="mrtResults"></div>
+      <p class="planner-credit">Routes and fares from <strong>OneMap</strong>, Singapore Land Authority. Fares shown are adult card fares.</p>
     </div>
   </div>
 
@@ -2102,6 +2151,7 @@
   <!-- auth.js last: it owns DOMContentLoaded and calls into app.js once a
        session exists, so app.js must already be parsed. -->
   <script src="journey.js"></script>
+  <script src="mrt.js"></script>
   <script src="auth.js"></script>
   <script>
     if ("serviceWorker" in navigator) {

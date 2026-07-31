@@ -3,6 +3,7 @@ const webpush = require("web-push");
 
 const { SB_URL, fetchWithTimeout, serviceHeaders } = require("./_auth");
 const { trackRides } = require("./track-rides");
+const { checkTrainAlerts } = require("./train-alerts");
 
 const LTA_KEY = process.env.LTA_API_KEY;
 const CRON_SECRET = process.env.CRON_SECRET;
@@ -361,6 +362,15 @@ module.exports = async (req, res) => {
     errors.push(`Ride tracking: ${e.message}`);
   }
 
+  // Rail disruption alerts poll on the same tick, for the same reason.
+  let trains = null;
+  try {
+    trains = await checkTrainAlerts();
+    errors.push(...trains.errors);
+  } catch (e) {
+    errors.push(`Train alerts: ${e.message}`);
+  }
+
   res.json({
     ok: true,
     reminders: (reminders || []).length,
@@ -369,6 +379,7 @@ module.exports = async (req, res) => {
     sent,
     expired,
     rides: rides ? { tracked: rides.rides, sent: rides.sent, ended: rides.ended } : null,
+    trains: trains ? { changed: trains.changed, disrupted: !!trains.disrupted, sent: trains.sent } : null,
     errors,
   });
 };

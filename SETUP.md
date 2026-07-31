@@ -218,7 +218,32 @@ free external pinger to call the endpoint every minute:
 > (`{ "path": "/api/check-reminders", "schedule": "* * * * *" }`) and drop the
 > external pinger — the endpoint also accepts Vercel's own cron header.
 
-## 6. Telegram bot (optional)
+## 6. Rail network data
+
+`data/mrt.json` is committed to the repo — the map overlay, station search and
+the "near MRT" badge on bus stops all read it. LTA's own station dataset ships
+as an ESRI shapefile inside a zip, which is impractical to parse at runtime,
+and the rail network changes only a few times a year, so static is the right
+call.
+
+Regenerate it when a line or station opens:
+
+```bash
+node scripts/build-mrt-data.js
+```
+
+The script pulls heavy rail (NS/EW/NE/CC/DT/TE) and the LRT lines from two
+open datasets, merges them, derives interchanges, and fails loudly if a line
+segment references a station it doesn't have — a silent hole would draw a
+polyline across the map.
+
+Rail **disruption** alerts come from LTA DataMall's `TrainServiceAlerts`, which
+is polled on the same minute tick as the reminders. There is no bus equivalent:
+LTA publishes no bus-disruption API, and the operators announce them on social
+media only. Bus alerts are deliberately out of scope, and the settings UI says
+so rather than implying they're covered.
+
+## 7. Telegram bot (optional)
 
 Register the webhook with a secret token, so a leaked URL isn't enough to
 impersonate a linked chat:
@@ -232,7 +257,7 @@ curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \
 Then in the app: **Settings → Telegram → Get link code**, and send
 `/link <CODE>` to the bot within 10 minutes.
 
-## 7. Verify
+## 8. Verify
 
 1. **Accounts** — sign up with email/password (a 6-character password should be
    rejected client-side), then sign in with Google. Confirm the app is
@@ -264,7 +289,23 @@ Then in the app: **Settings → Telegram → Get link code**, and send
    phone*. The "your stop is next" push should still arrive one stop early.
    This is the whole point of tracking the bus rather than the handset, so if
    it only works with the app open, something is wrong.
-8. **Config health** — `GET /api/check-reminders?probe=1` with
+8. **Rail** — turn on the 🚆 overlay on the Map tab and check the lines and
+   interchanges look right. Query Sengkang → Jurong East in the train planner
+   and check the fare against TransitLink's published fare calculator.
+9. **Disruption alerts** — real disruptions can't be summoned on demand, so
+   POST a mocked payload to exercise the diff-and-push path:
+
+   ```bash
+   curl -X POST https://<your-app>.vercel.app/api/train-alerts \
+     -H "Authorization: Bearer $CRON_SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{"value":{"Status":2,"AffectedSegments":[{"Line":"EWL","Direction":"Boon Lay","Stations":"EW21,EW22,EW23"}]}}'
+   ```
+
+   A second identical POST should report `changed: false` and send nothing —
+   that's the hash diff doing its job. POST `{"value":{"Status":1,
+   "AffectedSegments":[]}}` to get the recovery notice.
+10. **Config health** — `GET /api/check-reminders?probe=1` with
    `Authorization: Bearer $CRON_SECRET` reports env-var and DB health without
    sending anything.
 

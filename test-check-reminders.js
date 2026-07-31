@@ -29,7 +29,8 @@ const SGT_OFFSET = 8 * 3600 * 1000;
 // answer both reads. `subRows` defaults to a single device owned by USER_A, so
 // existing tests that only care about reminder logic don't have to spell it
 // out.
-function makeMockFetch({ reminderRows = [], subRows = null, rideRows = [], vehicle = null, supabaseSaveOk = true, ltaMinutes = 3, ltaTimes = null, ltaError = false, ltaStatus = 200 } = {}) {
+function makeMockFetch({ reminderRows = [], subRows = null, rideRows = [], vehicle = null, trainAlerts = null, kvState = {}, prefsRows = [], supabaseSaveOk = true, ltaMinutes = 3, ltaTimes = null, ltaError = false, ltaStatus = 200 } = {}) {
+  const alerts = trainAlerts || { Status: 1, AffectedSegments: [] };
   const subs = subRows === null ? [makeSub()] : subRows;
   return async function mockFetch(url, opts = {}) {
     const urlStr = url.toString();
@@ -38,6 +39,20 @@ function makeMockFetch({ reminderRows = [], subRows = null, rideRows = [], vehic
     }
     if (urlStr.includes("/rest/v1/push_subs?select=")) {
       return { ok: true, json: async () => subs, text: async () => JSON.stringify(subs) };
+    }
+    if (urlStr.includes("TrainServiceAlerts")) {
+      return { ok: true, status: 200, json: async () => ({ value: alerts }) };
+    }
+    if (urlStr.includes("/rest/v1/kv") && (!opts.method || opts.method === "GET")) {
+      const rows = kvState.value ? [{ value: kvState.value }] : [];
+      return { ok: true, json: async () => rows, text: async () => JSON.stringify(rows) };
+    }
+    if (urlStr.includes("/rest/v1/kv") && opts.method === "POST") {
+      kvWrites.push(JSON.parse(opts.body));
+      return { ok: true, status: 200, text: async () => "" };
+    }
+    if (urlStr.includes("/rest/v1/user_prefs?select=")) {
+      return { ok: true, json: async () => prefsRows, text: async () => JSON.stringify(prefsRows) };
     }
     if (urlStr.includes("/rest/v1/rides?select=")) {
       return { ok: true, json: async () => rideRows, text: async () => JSON.stringify(rideRows) };
@@ -94,6 +109,7 @@ function makeMockFetch({ reminderRows = [], subRows = null, rideRows = [], vehic
 
 let deletedReminders = [];
 let endedRides = [];
+let kvWrites = [];
 let patchedReminders = [];
 let pushCallCount = 0;
 let lastPushPayload = null;
@@ -175,13 +191,20 @@ function makeSub(overrides = {}) {
 const HANDLER_PATH = path.join(__dirname, "api/check-reminders.js");
 
 const TRACK_RIDES_PATH = path.join(__dirname, "api/track-rides.js");
+const TRAIN_ALERTS_PATH = path.join(__dirname, "api/train-alerts.js");
 
 function loadHandler() {
-  // track-rides is required *by* check-reminders, so it has to be evicted too
-  // or it keeps the env vars from whichever test loaded it first.
+  // Both are required *by* check-reminders, so they have to be evicted too or
+  // they keep the env vars from whichever test loaded them first.
   delete require.cache[require.resolve(TRACK_RIDES_PATH)];
+  delete require.cache[require.resolve(TRAIN_ALERTS_PATH)];
   delete require.cache[require.resolve(HANDLER_PATH)];
   return require(HANDLER_PATH);
+}
+
+function loadTrainAlerts() {
+  delete require.cache[require.resolve(TRAIN_ALERTS_PATH)];
+  return require(TRAIN_ALERTS_PATH);
 }
 
 function resetEnv() {
@@ -195,6 +218,7 @@ function resetEnv() {
   process.env.CRON_SECRET = SECRET;
   deletedReminders = [];
   endedRides = [];
+  kvWrites = [];
   patchedReminders = [];
   pushCallCount = 0;
   lastPushPayload = null;
@@ -848,7 +872,155 @@ async function main() {
     assert.deepStrictEqual(body.errors, [], `Unexpected errors: ${JSON.stringify(body.errors)}`);
   });
 
-  // ── 11. Response shape ─────────────────────────────────────────────────
+  // ── 11. Train disruption alerts ────────────────────────────────────────
+
+  console.log("\nTrain disruption alerts");
+
+  const DISRUPTED = {
+    Status: 2,
+    AffectedSegments: [
+      { Line: "EWL", Direction: "Boon Lay", Stations: "EW21,EW22,EW23" },
+    ],
+  };
+  const NORMAL = { Status: 1, AffectedSegments: [] };
+
+  function alertReq(body) {
+    const { req, res } = makeReqRes();
+    req.method = body ? "POST" : "GET";
+    req.body = body || {};
+    return { req, res };
+  }
+
+  await test("a new disruption pushes to subscribers", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      trainAlerts: DISRUPTED,
+      subRows: [makeSub()],
+      prefsRows: [{ user_id: USER_A, data: {} }],
+    });
+    const { req, res } = alertReq();
+    await loadTrainAlerts()(req, res);
+    const { body } = res._get();
+    assert.strictEqual(body.disrupted, true);
+    assert.strictEqual(body.sent, 1);
+    assert.ok(lastPushPayload.title.includes("disruption"), `Got: ${lastPushPayload.title}`);
+    assert.ok(lastPushPayload.body.includes("East West Line"), `Got: ${lastPushPayload.body}`);
+  });
+
+  // The whole point of hashing: a minute-by-minute poll must not re-push the
+  // same outage sixty times an hour.
+  await test("an unchanged disruption does not push again", async () => {
+    resetEnv();
+    let stored = {};
+    global.fetch = makeMockFetch({
+      trainAlerts: DISRUPTED,
+      subRows: [makeSub()],
+      prefsRows: [{ user_id: USER_A, data: {} }],
+      kvState: stored,
+    });
+    await loadTrainAlerts()(...Object.values(alertReq()));
+    const firstHash = kvWrites[0]?.value?.hash;
+    assert.ok(firstHash, "expected the first pass to record a hash");
+
+    pushCallCount = 0;
+    stored.value = kvWrites[0].value;
+    const { req, res } = alertReq();
+    await loadTrainAlerts()(req, res);
+    assert.strictEqual(res._get().body.changed, false);
+    assert.strictEqual(pushCallCount, 0);
+  });
+
+  await test("recovery notifies the people who heard about the outage", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      trainAlerts: NORMAL,
+      subRows: [makeSub()],
+      prefsRows: [{ user_id: USER_A, data: { alertLines: ["EWL"] } }],
+      kvState: { value: { hash: "stale", disrupted: true, lines: ["EWL"] } },
+    });
+    const { req, res } = alertReq();
+    await loadTrainAlerts()(req, res);
+    assert.strictEqual(res._get().body.disrupted, false);
+    assert.strictEqual(pushCallCount, 1);
+    assert.ok(lastPushPayload.title.includes("restored"), `Got: ${lastPushPayload.title}`);
+  });
+
+  await test("normal service with no prior outage says nothing", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      trainAlerts: NORMAL,
+      subRows: [makeSub()],
+      prefsRows: [{ user_id: USER_A, data: {} }],
+    });
+    const { req, res } = alertReq();
+    await loadTrainAlerts()(req, res);
+    assert.strictEqual(res._get().body.sent, 0);
+    assert.strictEqual(pushCallCount, 0);
+  });
+
+  await test("a user following only other lines is not pushed", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      trainAlerts: DISRUPTED,
+      subRows: [makeSub()],
+      prefsRows: [{ user_id: USER_A, data: { alertLines: ["NSL", "DTL"] } }],
+    });
+    const { req, res } = alertReq();
+    await loadTrainAlerts()(req, res);
+    assert.strictEqual(pushCallCount, 0);
+  });
+
+  await test("a user following the affected line is pushed", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      trainAlerts: DISRUPTED,
+      subRows: [makeSub()],
+      prefsRows: [{ user_id: USER_A, data: { alertLines: ["EWL", "NSL"] } }],
+    });
+    const { req, res } = alertReq();
+    await loadTrainAlerts()(req, res);
+    assert.strictEqual(pushCallCount, 1);
+  });
+
+  await test("an empty line list means opted out entirely", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      trainAlerts: DISRUPTED,
+      subRows: [makeSub()],
+      prefsRows: [{ user_id: USER_A, data: { alertLines: [] } }],
+    });
+    const { req, res } = alertReq();
+    await loadTrainAlerts()(req, res);
+    assert.strictEqual(pushCallCount, 0);
+  });
+
+  // Real disruptions can't be summoned on demand, so a mocked payload is the
+  // only way to exercise this path against a live deployment.
+  await test("a POSTed payload overrides the LTA poll", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      trainAlerts: NORMAL,
+      subRows: [makeSub()],
+      prefsRows: [{ user_id: USER_A, data: {} }],
+    });
+    const { req, res } = alertReq({ value: DISRUPTED });
+    await loadTrainAlerts()(req, res);
+    assert.strictEqual(res._get().body.disrupted, true);
+    assert.strictEqual(pushCallCount, 1);
+  });
+
+  await test("check-reminders reports the train check in its response", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({ trainAlerts: NORMAL });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    const { body } = res._get();
+    assert.ok(body.trains, "expected a trains summary");
+    assert.strictEqual(body.trains.disrupted, false);
+    assert.deepStrictEqual(body.errors, [], `Unexpected errors: ${JSON.stringify(body.errors)}`);
+  });
+
+  // ── 12. Response shape ─────────────────────────────────────────────────
 
   console.log("\nResponse shape");
 

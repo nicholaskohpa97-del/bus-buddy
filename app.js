@@ -58,6 +58,10 @@ let state = {
   dropoffAlerts: JSON.parse(localStorage.getItem("bb_dropoffAlerts") || "[]"),
   modes: JSON.parse(localStorage.getItem("bb_modes") || "[]"),
   rides: [],
+  // null means "not chosen yet" — the default is derived from favourites on
+  // first open of Settings, which is different from an explicit empty list
+  // (opted out of rail alerts entirely).
+  alertLines: JSON.parse(localStorage.getItem("bb_alertLines") || "null"),
   places: sanitizePlaces(JSON.parse(localStorage.getItem("bb_places") || "{}")),
   busStops: null,
   currentStop: null,
@@ -187,6 +191,7 @@ async function bootstrapApp() {
   await restorePrefs();
   loadModes();
   loadRides();
+  ensureAlertLines().catch(() => {});
   startDepartureChecker();
   startArrivalTicker();
   maybeShowOnboarding();
@@ -458,9 +463,12 @@ function isLastBusArrival(estimatedArrivalIso, lastBusMinutes) {
 }
 
 // ── Stop classification: bus interchanges & MRT/LRT-connected stops ──
-// SG bus-stop Descriptions name station stops "…Stn" and interchanges "…Int".
-// We derive station locations from those, then also flag nearby stops by
-// proximity — so detection uses both naming convention and location.
+// This used to guess: it took every bus stop whose Description matched
+// /\bstn\b/i as evidence of a station, then flagged anything within 150 m of
+// one. That invents stations from any description containing "stn" and misses
+// every real station whose surrounding stops aren't named after it. Now that
+// data/mrt.json ships the actual network, proximity to a real station answers
+// it — with the old heuristic kept only as a fallback if that file can't load.
 let stationAnchors = null;
 const stopClassCache = new Map();
 
@@ -473,21 +481,36 @@ async function getStationAnchors() {
   return stationAnchors;
 }
 
-// Returns { interchange, mrt } for a stop, memoized by BusStopCode.
+// Returns { interchange, mrt, station } for a stop, memoized by BusStopCode.
+// `station` names the rail station when one is close enough to walk to.
 async function classifyStop(stop) {
-  if (!stop) return { interchange: false, mrt: false };
+  if (!stop) return { interchange: false, mrt: false, station: null };
   const cached = stopClassCache.get(stop.BusStopCode);
   if (cached) return cached;
   const desc = stop.Description || "";
   const interchange = /\bint\b/i.test(desc);
-  let mrt = /\bstn\b/i.test(desc);
-  if (!mrt) {
-    const anchors = await getStationAnchors();
-    mrt = anchors.some(
-      ([lat, lng]) => haversine(stop.Latitude, stop.Longitude, lat, lng) <= 150
-    );
+
+  let mrt = false;
+  let station = null;
+  try {
+    const near = await mrtStationsNear(stop.Latitude, stop.Longitude);
+    if (near.length > 0) {
+      mrt = true;
+      station = near[0].station.name;
+    }
+  } catch {
+    // Rail data unavailable — fall back to the naming/proximity heuristic
+    // rather than dropping the badge entirely.
+    mrt = /\bstn\b/i.test(desc);
+    if (!mrt) {
+      const anchors = await getStationAnchors();
+      mrt = anchors.some(
+        ([lat, lng]) => haversine(stop.Latitude, stop.Longitude, lat, lng) <= 150
+      );
+    }
   }
-  const result = { interchange, mrt };
+
+  const result = { interchange, mrt, station };
   stopClassCache.set(stop.BusStopCode, result);
   return result;
 }
@@ -495,7 +518,8 @@ async function classifyStop(stop) {
 // Badge markup for a classified stop (reused by list + detail).
 function stopTagsHtml(cls) {
   let html = "";
-  if (cls.mrt) html += '<span class="route-tag route-tag-mrt">🚆 MRT</span>';
+  if (cls.mrt)
+    html += `<span class="route-tag route-tag-mrt" title="${cls.station ? escapeHtml(cls.station) + " station" : "Near a rail station"}">🚆 ${escapeHtml(cls.station || "MRT")}</span>`;
   if (cls.interchange) html += '<span class="route-tag route-tag-int">🔁 Int</span>';
   return html;
 }
@@ -3373,6 +3397,7 @@ async function openSettings() {
   }
   refreshServerKeyStatus();
   refreshTelegramStatus();
+  renderAlertLines();
 }
 
 // The LTA key is a server env var, so there is nothing to type here any more —
@@ -3389,6 +3414,95 @@ async function refreshServerKeyStatus() {
   } catch {
     el.textContent = "⚠️ Couldn't check the server's LTA key.";
   }
+}
+
+// ── Rail disruption alerts ──
+// data/mrt.json uses its own line ids; LTA's TrainServiceAlerts feed uses a
+// slightly different set. Mapping between them here keeps the discrepancy in
+// one place instead of leaking into both the UI and the cron.
+const ALERT_LINE_CODES = {
+  NSL: "NSL",
+  EWL: "EWL",
+  NEL: "NEL",
+  CCL: "CCL",
+  DTL: "DTL",
+  TEL: "TEL",
+  BPLRT: "BPL",
+  SKLRT: "SLRT",
+  PGLRT: "PLRT",
+};
+
+// Default subscription: the lines you'd actually be standing on. Derived from
+// the rail stations near your favourite stops, so a new user gets something
+// useful without configuring anything.
+async function defaultAlertLines() {
+  const lines = new Set();
+  try {
+    const index = await getBusStopIndex();
+    for (const f of state.favourites) {
+      const stop = index.get(f.code);
+      if (!stop) continue;
+      const near = await mrtStationsNear(stop.Latitude, stop.Longitude, 400);
+      for (const n of near) {
+        const code = ALERT_LINE_CODES[n.station.line];
+        if (code) lines.add(code);
+      }
+    }
+  } catch {
+    // Rail data or stop index unavailable — fall through to "all lines".
+  }
+  return [...lines];
+}
+
+// Runs at startup as well as when Settings opens: a user who never opens
+// Settings should still get alerts for the lines they travel on, rather than
+// silently ending up on the "follow everything" fallback.
+async function ensureAlertLines() {
+  if (Array.isArray(state.alertLines)) return;
+  const derived = await defaultAlertLines();
+  // Nothing near rail yet → follow everything rather than nothing.
+  state.alertLines = derived.length > 0 ? derived : Object.values(ALERT_LINE_CODES);
+  localStorage.setItem("bb_alertLines", JSON.stringify(state.alertLines));
+  syncPrefs();
+}
+
+async function renderAlertLines() {
+  const container = document.getElementById("alertLinesList");
+  if (!container) return;
+  let data;
+  try {
+    data = await loadMrtData();
+    await ensureAlertLines();
+  } catch {
+    container.innerHTML =
+      '<p style="font-size:12px;color:var(--text2);">Couldn\'t load the rail network.</p>';
+    return;
+  }
+
+  const seen = new Set();
+  container.innerHTML = data.lines
+    .map((l) => {
+      const code = ALERT_LINE_CODES[l.id];
+      if (!code || seen.has(code)) return "";
+      seen.add(code);
+      const on = state.alertLines.includes(code);
+      return `
+      <label class="alert-line">
+        <input type="checkbox" ${on ? "checked" : ""} onchange="toggleAlertLine('${code}',this.checked)">
+        <span class="alert-line-swatch" style="background:${l.colour}"></span>
+        <span>${escapeHtml(l.name)}</span>
+      </label>`;
+    })
+    .join("");
+}
+
+function toggleAlertLine(code, on) {
+  const set = new Set(state.alertLines || []);
+  if (on) set.add(code);
+  else set.delete(code);
+  state.alertLines = [...set];
+  localStorage.setItem("bb_alertLines", JSON.stringify(state.alertLines));
+  syncPrefs();
 }
 
 // ── Telegram account linking ──
@@ -3697,6 +3811,7 @@ async function pushPrefsNow() {
       body: JSON.stringify({
         data: {
           favourites: state.favourites,
+          alertLines: state.alertLines,
           recentSearches: state.recentSearches,
           places: state.places,
           dropoffAlerts: state.dropoffAlerts,
@@ -3745,6 +3860,10 @@ async function restorePrefs() {
       if (Array.isArray(data.favourites)) {
         state.favourites = data.favourites;
         localStorage.setItem(FAV_KEY, JSON.stringify(state.favourites));
+      }
+      if (Array.isArray(data.alertLines)) {
+        state.alertLines = data.alertLines;
+        localStorage.setItem("bb_alertLines", JSON.stringify(state.alertLines));
       }
       if (Array.isArray(data.recentSearches)) {
         state.recentSearches = data.recentSearches.slice(0, RECENT_MAX);
