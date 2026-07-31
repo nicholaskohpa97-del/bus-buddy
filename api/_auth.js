@@ -33,10 +33,14 @@ function fetchWithTimeout(url, options = {}) {
 }
 
 // Headers for server-only queries that must span all users (the cron).
+//
+// The key goes in `apikey` only, never `Authorization: Bearer`. Legacy
+// service_role keys are JWTs and are accepted in either header, but the newer
+// sb_secret_... keys are opaque and get rejected as bearer tokens. Sending it
+// only in `apikey` works for both, and legacy keys are deprecated end of 2026.
 function serviceHeaders(extra = {}) {
   return {
     apikey: serviceKey(),
-    Authorization: `Bearer ${serviceKey()}`,
     "Content-Type": "application/json",
     ...extra,
   };
