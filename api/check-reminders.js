@@ -1,16 +1,7 @@
 const webpush = require("web-push");
-
-const SB_URL = process.env.SUPABASE_URL;
-const SB_KEY = process.env.SUPABASE_ANON_KEY;
-const LTA_KEY = process.env.LTA_API_KEY;
-const CRON_SECRET = process.env.CRON_SECRET;
+const { sbUrl, serviceKey, serviceHeaders, fetchWithTimeout } = require("./_auth");
 
 const COOLDOWN_MS = 60 * 60 * 1000;
-const FETCH_TIMEOUT_MS = 8000;
-
-function fetchWithTimeout(url, options = {}) {
-  return fetch(url, { ...options, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-}
 
 function vapidReady() {
   if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) return false;
@@ -22,26 +13,50 @@ function vapidReady() {
   return true;
 }
 
-async function getRows() {
-  const res = await fetchWithTimeout(`${SB_URL}/rest/v1/push_subs?select=device_id,data`, {
-    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
-  });
+// This job runs with the service-role key because it must read across every
+// user's rows. RLS would (correctly) hide them from the anon key.
+async function getPrefRows() {
+  const res = await fetchWithTimeout(
+    `${sbUrl()}/rest/v1/user_prefs?select=user_id,data`,
+    { headers: serviceHeaders() }
+  );
   if (!res.ok) throw new Error(`Supabase ${res.status}: ${await res.text()}`);
   return res.json();
 }
 
-async function saveRow(deviceId, data) {
-  const res = await fetchWithTimeout(`${SB_URL}/rest/v1/push_subs`, {
+async function getSubRows() {
+  const res = await fetchWithTimeout(
+    `${sbUrl()}/rest/v1/push_subs?select=user_id,device_id,subscription`,
+    { headers: serviceHeaders() }
+  );
+  if (!res.ok) throw new Error(`Supabase ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+async function savePrefs(userId, data) {
+  const res = await fetchWithTimeout(`${sbUrl()}/rest/v1/user_prefs`, {
     method: "POST",
-    headers: {
-      apikey: SB_KEY,
-      Authorization: `Bearer ${SB_KEY}`,
-      "Content-Type": "application/json",
+    headers: serviceHeaders({
       Prefer: "resolution=merge-duplicates,return=minimal",
-    },
-    body: JSON.stringify({ device_id: deviceId, data, updated_at: new Date().toISOString() }),
+    }),
+    body: JSON.stringify({
+      user_id: userId,
+      data,
+      updated_at: new Date().toISOString(),
+    }),
   });
   if (!res.ok) throw new Error(`Supabase save ${res.status}: ${await res.text()}`);
+}
+
+// A 404/410 from the push service means the browser threw the subscription
+// away; drop that device rather than retrying it every minute forever.
+async function deleteSub(userId, deviceId) {
+  await fetchWithTimeout(
+    `${sbUrl()}/rest/v1/push_subs?user_id=eq.${userId}&device_id=eq.${encodeURIComponent(
+      deviceId
+    )}`,
+    { method: "DELETE", headers: serviceHeaders() }
+  );
 }
 
 async function fetchArrivalMin(stop, service) {
@@ -49,7 +64,7 @@ async function fetchArrivalMin(stop, service) {
   url.searchParams.set("BusStopCode", stop);
   if (service) url.searchParams.set("ServiceNo", service);
   const resp = await fetchWithTimeout(url.toString(), {
-    headers: { AccountKey: LTA_KEY, accept: "application/json" },
+    headers: { AccountKey: process.env.LTA_API_KEY, accept: "application/json" },
   });
   if (!resp.ok) throw new Error(`LTA ${resp.status}`);
   const data = await resp.json();
@@ -61,7 +76,7 @@ async function fetchArrivalMin(stop, service) {
 module.exports = async (req, res) => {
   const auth = req.headers.authorization || "";
   const okAuth =
-    (CRON_SECRET && auth === `Bearer ${CRON_SECRET}`) ||
+    (process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`) ||
     !!req.headers["x-vercel-cron"];
   if (!okAuth) return res.status(401).json({ error: "Unauthorized" });
 
@@ -69,18 +84,19 @@ module.exports = async (req, res) => {
   // Hit /api/check-reminders?probe=1 (with auth header) to debug config issues.
   if (req.query.probe === "1") {
     const checks = {
-      LTA_API_KEY: !!LTA_KEY,
+      LTA_API_KEY: !!process.env.LTA_API_KEY,
       VAPID_PUBLIC_KEY: !!process.env.VAPID_PUBLIC_KEY,
       VAPID_PRIVATE_KEY: !!process.env.VAPID_PRIVATE_KEY,
       VAPID_SUBJECT: !!process.env.VAPID_SUBJECT,
-      SUPABASE_URL: !!SB_URL,
-      SUPABASE_ANON_KEY: !!SB_KEY,
-      CRON_SECRET: !!CRON_SECRET,
+      SUPABASE_URL: !!sbUrl(),
+      SUPABASE_ANON_KEY: !!process.env.SUPABASE_ANON_KEY,
+      SUPABASE_SERVICE_ROLE_KEY: !!serviceKey(),
+      CRON_SECRET: !!process.env.CRON_SECRET,
     };
     let dbRows = null;
     let dbError = null;
     try {
-      const rows = await getRows();
+      const rows = await getPrefRows();
       dbRows = Array.isArray(rows) ? rows.length : rows;
     } catch (e) {
       dbError = e.message;
@@ -89,7 +105,9 @@ module.exports = async (req, res) => {
     return res.json({ ok: allOk, checks, dbRows, dbError });
   }
 
-  if (!LTA_KEY) return res.status(400).json({ error: "LTA_API_KEY not set" });
+  if (!process.env.LTA_API_KEY) return res.status(400).json({ error: "LTA_API_KEY not set" });
+  if (!serviceKey())
+    return res.status(400).json({ error: "SUPABASE_SERVICE_ROLE_KEY not set" });
   if (!vapidReady()) return res.status(400).json({ error: "VAPID keys not set" });
 
   const sgt = new Date(Date.now() + 8 * 3600 * 1000);
@@ -97,27 +115,35 @@ module.exports = async (req, res) => {
   const todayDow = sgt.getUTCDay();
   const now = Date.now();
 
-  let rows;
+  let prefRows;
+  let subRows;
   try {
-    rows = await getRows();
+    [prefRows, subRows] = await Promise.all([getPrefRows(), getSubRows()]);
   } catch (e) {
     return res.status(500).json({ error: "DB read failed", details: e.message });
+  }
+
+  // Preferences are per account; push subscriptions are per device. One
+  // reminder therefore fans out to every device the user is signed in on.
+  const subsByUser = new Map();
+  for (const row of subRows || []) {
+    if (!row.subscription) continue;
+    if (!subsByUser.has(row.user_id)) subsByUser.set(row.user_id, []);
+    subsByUser.get(row.user_id).push(row);
   }
 
   let sent = 0;
   let checked = 0;
   const errors = [];
 
-  // Process all devices in parallel — each device row is independent.
-  await Promise.all((rows || []).map(async (row) => {
+  await Promise.all((prefRows || []).map(async (row) => {
     const data = row.data || {};
-    const sub = data.subscription;
     const reminders = data.reminders || [];
     const notifyState = data.notifyState || {};
-    if (!sub || reminders.length === 0) return;
+    const subs = subsByUser.get(row.user_id) || [];
+    if (subs.length === 0 || reminders.length === 0) return;
 
     let rowChanged = false;
-    let subDead = false;
 
     for (const r of reminders) {
       if (!r.enabled || !r.time) continue;
@@ -146,32 +172,42 @@ module.exports = async (req, res) => {
         url: "/",
       });
 
-      try {
-        await webpush.sendNotification(sub, payload);
+      let deliveredToAny = false;
+      for (const sub of subs) {
+        try {
+          await webpush.sendNotification(sub.subscription, payload);
+          deliveredToAny = true;
+          sent++;
+        } catch (err) {
+          if (err.statusCode === 404 || err.statusCode === 410) {
+            try {
+              await deleteSub(row.user_id, sub.device_id);
+            } catch (e) {
+              errors.push(`Sub prune ${sub.device_id}: ${e.message}`);
+            }
+          } else {
+            errors.push(`Push ${sub.device_id}: ${err.message}`);
+          }
+        }
+      }
+
+      // Only start the cooldown once the alert actually reached a device,
+      // otherwise a transient failure would silently swallow the reminder.
+      if (deliveredToAny) {
         notifyState[r.id] = { lastFired: now };
         rowChanged = true;
-        sent++;
-      } catch (err) {
-        if (err.statusCode === 404 || err.statusCode === 410) {
-          subDead = true;
-          break;
-        }
-        errors.push(`Push ${row.device_id}: ${err.message}`);
       }
     }
 
-    try {
-      if (subDead) {
-        data.subscription = null;
-        await saveRow(row.device_id, data);
-      } else if (rowChanged) {
+    if (rowChanged) {
+      try {
         data.notifyState = notifyState;
-        await saveRow(row.device_id, data);
+        await savePrefs(row.user_id, data);
+      } catch (e) {
+        errors.push(`DB save ${row.user_id}: ${e.message}`);
       }
-    } catch (e) {
-      errors.push(`DB save ${row.device_id}: ${e.message}`);
     }
   }));
 
-  res.json({ ok: true, devices: (rows || []).length, checked, sent, errors });
+  res.json({ ok: true, users: (prefRows || []).length, checked, sent, errors });
 };

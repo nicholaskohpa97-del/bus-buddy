@@ -1,26 +1,31 @@
 const webpush = require("web-push");
+const {
+  sbUrl,
+  fetchWithTimeout,
+  userHeaders,
+  requireUser,
+  applyCors,
+} = require("./_auth");
 
-const SB_URL = process.env.SUPABASE_URL;
-const SB_KEY = process.env.SUPABASE_ANON_KEY;
-
-async function getSub(deviceId) {
-  const res = await fetch(
-    `${SB_URL}/rest/v1/push_subs?device_id=eq.${encodeURIComponent(
+async function getSubscription(user, deviceId) {
+  const res = await fetchWithTimeout(
+    `${sbUrl()}/rest/v1/push_subs?user_id=eq.${user.id}&device_id=eq.${encodeURIComponent(
       deviceId
-    )}&select=data`,
-    { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } }
+    )}&select=subscription`,
+    { headers: userHeaders(user.token) }
   );
+  if (!res.ok) throw new Error(`Supabase ${res.status}`);
   const rows = await res.json();
-  return rows[0]?.data?.subscription || null;
+  return rows[0]?.subscription || null;
 }
 
 module.exports = async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
+  if (applyCors(req, res)) return;
   if (req.method !== "POST")
     return res.status(405).json({ error: "Method not allowed" });
+
+  const user = await requireUser(req, res);
+  if (!user) return;
 
   if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY)
     return res.status(400).json({ error: "VAPID keys not configured" });
@@ -36,7 +41,7 @@ module.exports = async (req, res) => {
 
   let sub;
   try {
-    sub = await getSub(deviceId);
+    sub = await getSubscription(user, deviceId);
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
