@@ -1,4 +1,4 @@
-const CACHE = "bus-buddy-v11";
+const CACHE = "bus-buddy-v12";
 const ASSETS = ["/", "/app.js", "/auth.js", "/i18n.js", "/manifest.json"];
 
 self.addEventListener("install", (e) => {
@@ -33,17 +33,43 @@ self.addEventListener("push", (e) => {
     vibrate: [200, 100, 200, 100, 400],
     tag: payload.tag || "bus-buddy-alert",
     renotify: true,
-    data: { url: payload.url || "/" },
+    actions: Array.isArray(payload.actions) ? payload.actions : [],
+    // Carried through to notificationclick — a one-shot's Dismiss button needs
+    // the reminder id and its token, and the SW has no other way to get them.
+    data: {
+      url: payload.url || "/",
+      reminderId: payload.reminderId || null,
+      dismissToken: payload.dismissToken || null,
+    },
   };
   e.waitUntil(self.registration.showNotification(title, opts));
 });
 
 self.addEventListener("notificationclick", (e) => {
+  const data = e.notification.data || {};
   e.notification.close();
+
+  // "Stop telling me about this bus." Authorised by the token that came with
+  // the notification, since there's no session available out here.
+  if (e.action === "dismiss") {
+    if (!data.reminderId || !data.dismissToken) return;
+    e.waitUntil(
+      fetch("/api/dismiss-reminder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reminderId: data.reminderId,
+          dismissToken: data.dismissToken,
+        }),
+      }).catch(() => {})
+    );
+    return;
+  }
+
   e.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
       if (list.length > 0) return list[0].focus();
-      return clients.openWindow("/");
+      return clients.openWindow(data.url || "/");
     })
   );
 });

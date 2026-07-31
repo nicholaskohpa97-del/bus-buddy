@@ -29,7 +29,7 @@ const SGT_OFFSET = 8 * 3600 * 1000;
 // answer both reads. `subRows` defaults to a single device owned by USER_A, so
 // existing tests that only care about reminder logic don't have to spell it
 // out.
-function makeMockFetch({ reminderRows = [], subRows = null, supabaseSaveOk = true, ltaMinutes = 3, ltaError = false, ltaStatus = 200 } = {}) {
+function makeMockFetch({ reminderRows = [], subRows = null, supabaseSaveOk = true, ltaMinutes = 3, ltaTimes = null, ltaError = false, ltaStatus = 200 } = {}) {
   const subs = subRows === null ? [makeSub()] : subRows;
   return async function mockFetch(url, opts = {}) {
     const urlStr = url.toString();
@@ -41,14 +41,28 @@ function makeMockFetch({ reminderRows = [], subRows = null, supabaseSaveOk = tru
     }
     if (urlStr.includes("/rest/v1/reminders") && opts.method === "PATCH") {
       if (!supabaseSaveOk) return { ok: false, status: 500, text: async () => "Internal Server Error" };
+      patchedReminders.push({ url: urlStr, body: JSON.parse(opts.body) });
       return { ok: true, status: 200, text: async () => "" };
     }
     if (urlStr.includes("/rest/v1/push_subs") && opts.method === "DELETE") {
       return { ok: true, status: 200, text: async () => "" };
     }
+    if (urlStr.includes("/rest/v1/reminders") && opts.method === "DELETE") {
+      deletedReminders.push(urlStr);
+      return { ok: true, status: 200, text: async () => "" };
+    }
     if (urlStr.includes("BusArrival")) {
       if (ltaError) throw new Error("LTA network error");
       if (ltaStatus !== 200) return { ok: false, status: ltaStatus, json: async () => ({}), text: async () => "Bad Request" };
+      if (ltaTimes) {
+        const svc = { NextBus: {}, NextBus2: {}, NextBus3: {} };
+        ltaTimes.forEach((mins, i) => {
+          svc[["NextBus", "NextBus2", "NextBus3"][i]] = {
+            EstimatedArrival: new Date(Date.now() + mins * 60000).toISOString(),
+          };
+        });
+        return { ok: true, status: 200, json: async () => ({ Services: [svc] }) };
+      }
       const eta = new Date(Date.now() + ltaMinutes * 60000).toISOString();
       return { ok: true, status: 200, json: async () => ({ Services: [{ NextBus: { EstimatedArrival: eta } }] }) };
     }
@@ -56,6 +70,8 @@ function makeMockFetch({ reminderRows = [], subRows = null, supabaseSaveOk = tru
   };
 }
 
+let deletedReminders = [];
+let patchedReminders = [];
 let pushCallCount = 0;
 let lastPushPayload = null;
 let pushShouldFail = false;
@@ -149,6 +165,8 @@ function resetEnv() {
   process.env.VAPID_PRIVATE_KEY = "privkey" + "A".repeat(36);
   process.env.VAPID_SUBJECT = "mailto:test@example.com";
   process.env.CRON_SECRET = SECRET;
+  deletedReminders = [];
+  patchedReminders = [];
   pushCallCount = 0;
   lastPushPayload = null;
   pushShouldFail = false;
@@ -518,7 +536,7 @@ async function main() {
     assert.strictEqual(res._get().body.sent, 1, "only account A's device should be pushed to");
   });
 
-  await test("non-scheduled reminder types are ignored by the scheduled path", async () => {
+  await test("a one-shot with no targetArrival is skipped, not run as scheduled", async () => {
     resetEnv();
     global.fetch = makeMockFetch({ reminderRows: [makeRow({}, { type: "oneshot" })], ltaMinutes: 2 });
     const { req, res } = makeReqRes();
@@ -527,7 +545,151 @@ async function main() {
     assert.strictEqual(pushCallCount, 0);
   });
 
-  // ── 9. Response shape ──────────────────────────────────────────────────
+  // ── 9. One-shot reminders ──────────────────────────────────────────────
+
+  console.log("\nOne-shot reminders");
+
+  // Builds a one-shot targeting a bus `mins` from now.
+  function makeOneShot(mins, payloadOverrides = {}, rowOverrides = {}) {
+    return {
+      id: "os1",
+      user_id: USER_A,
+      type: "oneshot",
+      payload: {
+        stop: "12345",
+        service: "65",
+        targetArrival: new Date(Date.now() + mins * 60000).toISOString(),
+        firedCount: 0,
+        nickname: "Bus 65 at stop 12345",
+        ...payloadOverrides,
+      },
+      notify_state: {},
+      ...rowOverrides,
+    };
+  }
+
+  await test("one-shot ignores the time-of-day window a scheduled reminder obeys", async () => {
+    resetEnv();
+    // 35 minutes past would put a scheduled reminder outside its window.
+    global.fetch = makeMockFetch({ reminderRows: [makeOneShot(8)], ltaTimes: [8, 20, 35] });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(res._get().body.checked, 1);
+    assert.strictEqual(pushCallCount, 1);
+  });
+
+  await test("one-shot ignores the day-of-week filter", async () => {
+    resetEnv();
+    const otherDay = (sgtNowDow() + 1) % 7;
+    global.fetch = makeMockFetch({ reminderRows: [makeOneShot(8, { days: [otherDay] })], ltaTimes: [8, 20, 35] });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 1);
+  });
+
+  await test("one-shot cooldown is 3 min, not the scheduled hour", async () => {
+    resetEnv();
+    const row = makeOneShot(8, {}, { notify_state: { lastFired: Date.now() - 4 * 60000, firedCount: 1 } });
+    global.fetch = makeMockFetch({ reminderRows: [row], ltaTimes: [8, 20, 35] });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 1, "4 min after the last fire should be past the one-shot cooldown");
+  });
+
+  await test("one-shot inside its 3 min cooldown does not fire", async () => {
+    resetEnv();
+    const row = makeOneShot(8, {}, { notify_state: { lastFired: Date.now() - 60000, firedCount: 1 } });
+    global.fetch = makeMockFetch({ reminderRows: [row], ltaTimes: [8, 20, 35] });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 0);
+  });
+
+  await test("bus arriving (ETA <= 1 min) → final push, reminder deleted", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({ reminderRows: [makeOneShot(1)], ltaTimes: [1, 15, 30] });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 1);
+    assert.ok(lastPushPayload.title.includes("arriving"), `Got: ${lastPushPayload.title}`);
+    assert.strictEqual(res._get().body.expired, 1);
+    assert.ok(deletedReminders.some((u) => u.includes("id=eq.os1")), "expected the reminder to be deleted");
+  });
+
+  await test("arrival push beats the cooldown — it is the one that matters", async () => {
+    resetEnv();
+    const row = makeOneShot(1, {}, { notify_state: { lastFired: Date.now() - 1000, firedCount: 2 } });
+    global.fetch = makeMockFetch({ reminderRows: [row], ltaTimes: [1, 15, 30] });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 1);
+    assert.ok(deletedReminders.some((u) => u.includes("id=eq.os1")));
+  });
+
+  await test("10th fire deletes the reminder (spam cap)", async () => {
+    resetEnv();
+    const row = makeOneShot(8, { firedCount: 9 }, { notify_state: { lastFired: Date.now() - 10 * 60000, firedCount: 9 } });
+    global.fetch = makeMockFetch({ reminderRows: [row], ltaTimes: [8, 20, 35] });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 1);
+    assert.ok(deletedReminders.some((u) => u.includes("id=eq.os1")), "expected deletion at the fire cap");
+  });
+
+  await test("drift: re-anchors targetArrival to the matched arrival", async () => {
+    resetEnv();
+    // Target says 8 min; LTA now says 10. Within tolerance, so it should track.
+    const row = makeOneShot(8, {}, { notify_state: { lastFired: Date.now() - 60000, firedCount: 1 } });
+    global.fetch = makeMockFetch({ reminderRows: [row], ltaTimes: [10, 25, 40] });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 0, "still cooling down");
+    const patch = patchedReminders.find((p) => p.url.includes("id=eq.os1"));
+    assert.ok(patch, "expected the drifted target to be saved");
+    assert.notStrictEqual(patch.body.payload.targetArrival, row.payload.targetArrival);
+  });
+
+  await test("no arrival within tolerance but target is recent → left alone", async () => {
+    resetEnv();
+    // Target 8 min out, only a bus 40 min out — way beyond the 5 min window.
+    global.fetch = makeMockFetch({ reminderRows: [makeOneShot(8)], ltaTimes: [40] });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 0);
+    assert.strictEqual(res._get().body.expired, 0);
+    assert.strictEqual(deletedReminders.length, 0);
+  });
+
+  await test("target long past with no match → reminder abandoned", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({ reminderRows: [makeOneShot(-45)], ltaTimes: [40] });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(res._get().body.expired, 1);
+    assert.ok(deletedReminders.some((u) => u.includes("id=eq.os1")));
+  });
+
+  await test("non-arrival push carries a Dismiss action and its token", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({ reminderRows: [makeOneShot(8)], ltaTimes: [8, 20, 35] });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(lastPushPayload.actions.length, 1);
+    assert.strictEqual(lastPushPayload.actions[0].action, "dismiss");
+    assert.strictEqual(lastPushPayload.reminderId, "os1");
+    assert.ok(lastPushPayload.dismissToken, "expected a dismiss token in the payload");
+  });
+
+  await test("the dismiss token is stable across fires", async () => {
+    resetEnv();
+    const row = makeOneShot(8, {}, { notify_state: { dismissToken: "tok-abc", lastFired: Date.now() - 10 * 60000, firedCount: 1 } });
+    global.fetch = makeMockFetch({ reminderRows: [row], ltaTimes: [8, 20, 35] });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(lastPushPayload.dismissToken, "tok-abc");
+  });
+
+  // ── 10. Response shape ─────────────────────────────────────────────────
 
   console.log("\nResponse shape");
 
@@ -538,7 +700,7 @@ async function main() {
     await loadHandler()(req, res);
     const { body } = res._get();
     assert.strictEqual(body.ok, true);
-    for (const field of ["reminders","devices","checked","sent","errors"]) {
+    for (const field of ["reminders","devices","checked","sent","expired","errors"]) {
       assert.ok(field in body, `Missing field: ${field}`);
     }
     assert.ok(Array.isArray(body.errors));

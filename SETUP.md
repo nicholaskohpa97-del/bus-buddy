@@ -208,7 +208,17 @@ Then in the app: **Settings → Telegram → Get link code**, and send
 3. **Reminders** — create a departure reminder; confirm a row appears in
    `reminders`. When the bus is within your lead time during the reminder
    window, you get a push even with the app closed.
-4. **Config health** — `GET /api/check-reminders?probe=1` with
+4. **Favourites and history** — star a specific service at a stop and confirm
+   the list orders by real distance (and falls back gracefully with location
+   denied). Search a few times and confirm the history appears when a search
+   box is focused and empty, and that ✕ / Clear all work.
+5. **One-shot reminders** — tap an arrival time in the Search tab and confirm
+   the bus. Pushes should land roughly 3 minutes apart, the reminder should
+   delete itself when the bus arrives, and the notification's **Dismiss**
+   button should stop it early. `POST /api/dismiss-reminder` is authorised by
+   a per-reminder token carried in the push payload, not a session — the
+   service worker has no access token.
+6. **Config health** — `GET /api/check-reminders?probe=1` with
    `Authorization: Bearer $CRON_SECRET` reports env-var and DB health without
    sending anything.
 

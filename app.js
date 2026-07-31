@@ -26,13 +26,34 @@ function newId() {
   return `${h.slice(0, 4).join("")}-${h.slice(4, 6).join("")}-${h.slice(6, 8).join("")}-${h.slice(8, 10).join("")}-${h.slice(10, 16).join("")}`;
 }
 
-const FAV_KEY = "bb_favourites";
+// A favourite is now { code, name, service, addedAt }: a whole stop when
+// `service` is null, or one specific bus at that stop when it's set. The old
+// {code, name} rows can't be upgraded — they were saved against a device id
+// with no account, and there's no way to guess which service was meant — so
+// the old key is dropped once, with a toast, rather than silently reinterpreted.
+const FAV_KEY = "bb_favourites_v2";
+const LEGACY_FAV_KEY = "bb_favourites";
+const FAV_RESET_FLAG = "bb_favReset_v2";
+const RECENT_KEY = "bb_recentSearches";
+const RECENT_MAX = 10;
+
+let favouritesWereReset = false;
+
+function clearLegacyFavourites() {
+  if (localStorage.getItem(FAV_RESET_FLAG)) return;
+  const had = !!localStorage.getItem(LEGACY_FAV_KEY);
+  localStorage.removeItem(LEGACY_FAV_KEY);
+  localStorage.setItem(FAV_RESET_FLAG, "1");
+  favouritesWereReset = had;
+}
+clearLegacyFavourites();
 
 // ── State ──
 let state = {
   refreshSec: parseInt(localStorage.getItem("bb_refreshSec") || "30"),
   reminderLeadMin: parseInt(localStorage.getItem("bb_reminderLead") || "5"),
   favourites: JSON.parse(localStorage.getItem(FAV_KEY) || "[]"),
+  recentSearches: JSON.parse(localStorage.getItem(RECENT_KEY) || "[]"),
   departureReminders: JSON.parse(localStorage.getItem("bb_deptReminders") || "[]"),
   dropoffAlerts: JSON.parse(localStorage.getItem("bb_dropoffAlerts") || "[]"),
   modes: JSON.parse(localStorage.getItem("bb_modes") || "[]"),
@@ -167,6 +188,9 @@ async function bootstrapApp() {
   startDepartureChecker();
   startArrivalTicker();
   maybeShowOnboarding();
+  if (favouritesWereReset) {
+    showToast("Favourites were reset — you can now star a whole stop or a single bus.");
+  }
   document.addEventListener('click', unlockAudio, { once: true });
   document.addEventListener('touchstart', unlockAudio, { once: true });
   if (window.__hideSplash) window.__hideSplash();
@@ -607,6 +631,95 @@ const SEARCH_SCOPES = {
   home: { input: "homeStopSearch", results: "homeSearchResults", nearby: "homeNearbyResults" },
 };
 
+// ── Recent searches ──
+// Recorded on *selection*, not on keystroke. A half-typed query is noise; the
+// thing the user actually picked is the signal, and it's the only thing that
+// can be replayed as a one-tap shortcut.
+function recentIdentity(e) {
+  if (e.type === "stop") return `stop:${e.code}`;
+  if (e.type === "service") return `service:${e.service}`;
+  return `address:${(e.label || "").toLowerCase()}`;
+}
+
+function recordRecentSearch(entry) {
+  if (!entry || !entry.label) return;
+  const id = recentIdentity(entry);
+  state.recentSearches = [
+    { ...entry, at: Date.now() },
+    ...state.recentSearches.filter((e) => recentIdentity(e) !== id),
+  ].slice(0, RECENT_MAX);
+  localStorage.setItem(RECENT_KEY, JSON.stringify(state.recentSearches));
+  syncPrefs();
+}
+
+function removeRecentSearch(id) {
+  state.recentSearches = state.recentSearches.filter((e) => recentIdentity(e) !== id);
+  localStorage.setItem(RECENT_KEY, JSON.stringify(state.recentSearches));
+  syncPrefs();
+  // Re-render every scope: both search bars can be showing this list.
+  Object.keys(SEARCH_SCOPES).forEach(renderRecentSearches);
+}
+
+function clearRecentSearches() {
+  state.recentSearches = [];
+  localStorage.setItem(RECENT_KEY, "[]");
+  syncPrefs();
+  Object.keys(SEARCH_SCOPES).forEach(renderRecentSearches);
+}
+
+const RECENT_ICONS = { stop: "🚏", service: "🚌", address: "📍" };
+
+function renderRecentSearches(scope = "arrivals") {
+  const cfg = SEARCH_SCOPES[scope];
+  const container = document.getElementById(cfg.results);
+  if (!container) return;
+  if (state.recentSearches.length === 0) {
+    container.classList.add("hidden");
+    container.innerHTML = "";
+    return;
+  }
+  const rows = state.recentSearches
+    .map((e) => {
+      const id = recentIdentity(e);
+      const onSelect =
+        e.type === "stop"
+          ? `selectStop('${e.code}','${scope}')`
+          : e.type === "service"
+          ? `selectService('${jsArg(e.service)}','${scope}')`
+          : `replayAddressSearch('${jsArg(e.label)}','${scope}')`;
+      const detail =
+        e.type === "stop"
+          ? e.code
+          : e.type === "service"
+          ? "Tap to view route &amp; stops"
+          : "Address";
+      return `
+      <div class="recent-item">
+        <span class="recent-icon" aria-hidden="true">${RECENT_ICONS[e.type] || "🔎"}</span>
+        <div class="search-result-item" onclick="${onSelect}">
+          <div class="search-result-name">${escapeHtml(e.label)}</div>
+          <div class="search-result-detail">${detail}</div>
+        </div>
+        <button class="recent-remove" onclick="event.stopPropagation();removeRecentSearch('${jsArg(id)}')"
+                title="Remove" aria-label="Remove ${escapeHtml(e.label)} from recent searches">&#10005;</button>
+      </div>`;
+    })
+    .join("");
+  container.innerHTML = `
+    <div class="recent-header">
+      <h4>Recent</h4>
+      <button class="recent-clear" onclick="clearRecentSearches()">Clear all</button>
+    </div>
+    ${rows}`;
+  container.classList.remove("hidden");
+}
+
+function replayAddressSearch(label, scope = "arrivals") {
+  const cfg = SEARCH_SCOPES[scope];
+  document.getElementById(cfg.input).value = label;
+  handleSearch(label, scope);
+}
+
 let searchDebounce = null;
 let searchGeneration = 0;
 async function handleSearch(val, scope = "arrivals") {
@@ -615,9 +728,9 @@ async function handleSearch(val, scope = "arrivals") {
   const container = document.getElementById(cfg.results);
   const trimmed = (val || "").trim();
   if (!trimmed) {
-    // Query cleared back to empty while still focused — re-offer nearby
-    // suggestions since no fresh "focus" event fires in that case.
-    container.classList.add("hidden");
+    // Query cleared back to empty while still focused — re-offer history and
+    // nearby suggestions, since no fresh "focus" event fires in that case.
+    renderRecentSearches(scope);
     maybeSuggestNearby(scope);
     return;
   }
@@ -712,10 +825,11 @@ function selectService(serviceNo, scope = "arrivals") {
   const cfg = SEARCH_SCOPES[scope];
   document.getElementById(cfg.results).classList.add("hidden");
   document.getElementById(cfg.nearby).classList.add("hidden");
+  recordRecentSearch({ type: "service", label: `Bus ${serviceNo}`, service: serviceNo });
   openRouteStops(serviceNo);
 }
 
-function selectStop(code, scope = "arrivals") {
+async function selectStop(code, scope = "arrivals") {
   const cfg = SEARCH_SCOPES[scope];
   document.getElementById(cfg.input).value = code;
   document.getElementById(cfg.results).classList.add("hidden");
@@ -723,6 +837,7 @@ function selectStop(code, scope = "arrivals") {
   switchTab("arrivals");
   document.getElementById("stopSearch").value = code;
   searchStop();
+  recordRecentSearch({ type: "stop", label: await getStopName(code), code });
 }
 
 // ── Reusable stop autocomplete (attached to any bus-stop input) ──
@@ -924,6 +1039,12 @@ function attachAddressAutocomplete(input) {
     input.dataset.lng = m.longitude;
     input.dataset.postal = m.postal || "";
     input.dataset.resolvedFor = input.value;
+    recordRecentSearch({
+      type: "address",
+      label: m.address || input.value,
+      lat: m.latitude,
+      lng: m.longitude,
+    });
     close();
     input.focus();
   };
@@ -1057,7 +1178,7 @@ async function loadArrivals(stopCode) {
     state.currentStop = stopCode;
 
     const stopName = await getStopName(stopCode);
-    const isFav = state.favourites.some((f) => f.code === stopCode);
+    const stopIsFav = isFav(stopCode, null);
 
     const liveByNo = new Map();
     (data.Services || []).forEach((svc) => {
@@ -1082,7 +1203,7 @@ async function loadArrivals(stopCode) {
               <h3>${escapeHtml(stopName)}</h3>
               <span class="bus-stop-code">${stopCode}</span>
             </div>
-            <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${jsArg(stopName)}')" title="Favourite">&#9733;</button>
+            <button class="icon-btn ${stopIsFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${jsArg(stopName)}',null)" title="Favourite all services at this stop" aria-label="Favourite this stop">&#9733;</button>
           </div>
           <div class="empty-state"><p>No bus services at this time.</p></div>
         </div>`;
@@ -1098,7 +1219,7 @@ async function loadArrivals(stopCode) {
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <div class="auto-refresh"><div class="dot"></div> Live</div>
-            <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${jsArg(stopName)}')" title="Favourite">&#9733;</button>
+            <button class="icon-btn ${stopIsFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${jsArg(stopName)}',null)" title="Favourite all services at this stop" aria-label="Favourite this stop">&#9733;</button>
           </div>
         </div>
         ${activeServices.length === 0 ? '<div class="empty-state" style="padding:16px 0;"><p>No bus services at this time.</p></div>' : ""}
@@ -1179,7 +1300,13 @@ function renderServiceRow(svc, stopCode, routeRow) {
         : "";
       const dataAttr = t.arrival ? ` data-arrival="${t.arrival}"` : "";
       const cssCls = isLast ? `${cls} last-bus` : cls;
-      return `<span class="arrival-badge ${cssCls}"${dataAttr}><span class="time-text">${badgeLabel(t.min)}</span>${meta}</span>`;
+      // Each chip is a real button: tapping one arms a one-shot reminder for
+      // that specific bus, so it has to be keyboard-reachable, not just
+      // tappable.
+      return `<button type="button" class="arrival-badge ${cssCls}"${dataAttr}
+        onclick="openOneShotPrompt('${stopCode}','${jsArg(svc.no)}','${t.arrival}')"
+        aria-label="Bus ${escapeHtml(svc.no)} in ${badgeLabel(t.min)} — remind me about this bus"
+        ><span class="time-text">${badgeLabel(t.min)}</span>${meta}</button>`;
     })
     .join("");
 
@@ -1191,7 +1318,8 @@ function renderServiceRow(svc, stopCode, routeRow) {
       </div>
       <div class="arrival-times">${badges}</div>
       <div class="service-actions">
-        <button class="icon-btn" onclick="quickDeptReminder('${stopCode}','${svc.no}')" title="Remind me" aria-label="Set reminder for bus ${svc.no}">&#128276;</button>
+        <button class="icon-btn ${isFav(stopCode, svc.no) ? "active" : ""}" onclick="toggleFavService('${stopCode}','${jsArg(svc.no)}')" title="Favourite this bus at this stop" aria-label="Favourite bus ${escapeHtml(svc.no)} at this stop">&#9733;</button>
+        <button class="icon-btn" onclick="quickDeptReminder('${stopCode}','${jsArg(svc.no)}')" title="Remind me" aria-label="Set reminder for bus ${escapeHtml(svc.no)}">&#128276;</button>
       </div>
     </div>`;
 }
@@ -1260,14 +1388,32 @@ function startAutoRefresh(stopCode) {
 }
 
 // ── Favourites ──
-function toggleFav(code, name) {
-  const idx = state.favourites.findIndex((f) => f.code === code);
+// Identity is (stop, service). Starring bus 165 at Orchard Stn and starring
+// the stop itself are two different saved things, so both keys go into the
+// comparison — matching on code alone is what made service-level favourites
+// impossible before.
+function favKey(code, service) {
+  return `${code}::${service || ""}`;
+}
+
+function isFav(code, service) {
+  return state.favourites.some((f) => favKey(f.code, f.service) === favKey(code, service));
+}
+
+function toggleFav(code, name, service) {
+  const key = favKey(code, service);
+  const idx = state.favourites.findIndex((f) => favKey(f.code, f.service) === key);
   if (idx >= 0) {
     state.favourites.splice(idx, 1);
-    showToast("Removed from favourites");
+    showToast(service ? `Removed bus ${service} at this stop` : "Removed from favourites");
   } else {
-    state.favourites.push({ code, name });
-    showToast("Added to favourites");
+    state.favourites.push({
+      code,
+      name,
+      service: service || null,
+      addedAt: Date.now(),
+    });
+    showToast(service ? `Saved bus ${service} at this stop` : "Added to favourites");
   }
   localStorage.setItem(FAV_KEY, JSON.stringify(state.favourites));
   renderFavourites();
@@ -1276,24 +1422,101 @@ function toggleFav(code, name) {
   if (state.currentStop === code) loadArrivals(code);
 }
 
-function renderFavourites() {
+// Starring from a service row, where only the stop code is to hand — the stop
+// name is resolved here rather than threaded through every render path.
+async function toggleFavService(code, service) {
+  const name = await getStopName(code);
+  toggleFav(code, name, service);
+}
+
+// ── Proximity ordering ──
+// Favourites are ordered by how far away they are, so the stop you're standing
+// at is first. The position is cached for a minute and only read on
+// load/refresh — never live. Re-ordering the list under the user's thumb as
+// they walk down the street would be hostile.
+let favPosCache = null;
+let favPosCacheAt = 0;
+const FAV_POS_TTL_MS = 60 * 1000;
+
+async function getSortPosition() {
+  if (favPosCache && Date.now() - favPosCacheAt < FAV_POS_TTL_MS) return favPosCache;
+  if (!navigator.geolocation) return null;
+  // Only use a fix we already have permission for. Sorting a list is not worth
+  // a permission prompt the user didn't ask for.
+  if (navigator.permissions && navigator.permissions.query) {
+    try {
+      const status = await navigator.permissions.query({ name: "geolocation" });
+      if (status.state !== "granted") return null;
+    } catch {
+      return null;
+    }
+  }
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        favPosCache = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+        favPosCacheAt = Date.now();
+        resolve(favPosCache);
+      },
+      () => resolve(null),
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: FAV_POS_TTL_MS }
+    );
+  });
+}
+
+// Nearest first when there's a fix; oldest-saved first otherwise. The
+// fallback is deliberately unlabelled — "sorted by distance" with no distance
+// available would be a lie, and an apology banner for a missing permission is
+// noise.
+async function favouritesInDisplayOrder() {
+  const list = state.favourites.slice();
+  const pos = await getSortPosition();
+  if (!pos) {
+    return list.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
+  }
+  let index;
+  try {
+    index = await getBusStopIndex();
+  } catch {
+    return list.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
+  }
+  return list
+    .map((f) => {
+      const s = index.get(f.code);
+      return {
+        ...f,
+        dist: s
+          ? haversine(pos.latitude, pos.longitude, s.Latitude, s.Longitude)
+          : Infinity,
+      };
+    })
+    .sort((a, b) => a.dist - b.dist);
+}
+
+function favLabel(f) {
+  return f.service ? `Bus ${f.service}` : "All services";
+}
+
+async function renderFavourites() {
   const list = document.getElementById("favList");
   const empty = document.getElementById("favEmpty");
+  if (!list) return;
   if (state.favourites.length === 0) {
     list.innerHTML = "";
     empty.classList.remove("hidden");
     return;
   }
   empty.classList.add("hidden");
-  list.innerHTML = state.favourites
+  const ordered = await favouritesInDisplayOrder();
+  list.innerHTML = ordered
     .map(
       (f) => `
     <div class="fav-item" onclick="goToStop('${f.code}')">
       <div>
-        <div class="fav-name">${escapeHtml(f.name)}</div>
-        <div class="fav-detail">${f.code}</div>
+        <div class="fav-name">${escapeHtml(f.name)}${f.service ? `<span class="fav-service">${escapeHtml(f.service)}</span>` : ""}</div>
+        <div class="fav-detail">${f.code} &middot; ${escapeHtml(favLabel(f))}${Number.isFinite(f.dist) ? ` &middot; ${formatDist(f.dist)}` : ""}</div>
       </div>
-      <button class="icon-btn" onclick="event.stopPropagation();toggleFav('${f.code}','${jsArg(f.name)}')" title="Remove">&#10005;</button>
+      <button class="icon-btn" onclick="event.stopPropagation();toggleFav('${f.code}','${jsArg(f.name)}',${f.service ? `'${jsArg(f.service)}'` : "null"})" title="Remove" aria-label="Remove favourite">&#10005;</button>
     </div>`
     )
     .join("");
@@ -1555,8 +1778,11 @@ function toggleDeptReminder(id) {
 }
 
 function renderDepartureReminders() {
+  renderOneShotReminders();
   const container = document.getElementById("departureReminders");
-  const visible = state.departureReminders.filter(r => !r.fromMode);
+  const visible = state.departureReminders.filter(
+    (r) => !r.fromMode && r.type !== "oneshot"
+  );
   if (visible.length === 0) {
     container.innerHTML =
       '<p style="color:var(--text2);font-size:13px;">No reminders set.</p>';
@@ -1577,6 +1803,88 @@ function renderDepartureReminders() {
       </div>
     </div>`
     )
+    .join("");
+}
+
+// ── One-shot reminders ──
+// A scheduled reminder answers "every weekday at 08:00, tell me when the 165
+// is close". A one-shot answers "this particular bus, the one arriving at
+// 08:07 — tell me when it's nearly here, then forget about it". It has no
+// time-of-day window and no repeat: it tracks one vehicle and deletes itself.
+let pendingOneShot = null;
+
+async function openOneShotPrompt(stopCode, serviceNo, arrivalIso) {
+  if (!arrivalIso) return;
+  const min = Math.max(0, Math.round((new Date(arrivalIso) - new Date()) / 60000));
+  if (min <= 1) {
+    showToast("That bus is already arriving.");
+    return;
+  }
+  if (state.departureReminders.some(
+    (r) => r.type === "oneshot" && r.stop === stopCode && r.service === serviceNo
+  )) {
+    showToast(`You already have a reminder for bus ${serviceNo} at this stop.`);
+    return;
+  }
+  pendingOneShot = { stop: stopCode, service: serviceNo, targetArrival: arrivalIso };
+  const name = await getStopName(stopCode);
+  document.getElementById("oneShotSummary").innerHTML =
+    `<strong>Bus ${escapeHtml(serviceNo)}</strong> at ${escapeHtml(name)}<br>` +
+    `<span class="oneshot-eta">arriving in about ${min} min</span>`;
+  document.getElementById("oneShotModal").classList.remove("hidden");
+  focusFirstInput("oneShotModal");
+}
+
+function confirmOneShot() {
+  if (!pendingOneShot) return;
+  const { stop, service, targetArrival } = pendingOneShot;
+  state.departureReminders.push({
+    id: newId(),
+    type: "oneshot",
+    stop,
+    service,
+    targetArrival,
+    firedCount: 0,
+    nickname: `Bus ${service} at stop ${stop}`,
+    enabled: true,
+  });
+  localStorage.setItem("bb_deptReminders", JSON.stringify(state.departureReminders));
+  document.getElementById("oneShotModal").classList.add("hidden");
+  pendingOneShot = null;
+  renderDepartureReminders();
+  refreshDashboard();
+  syncPushReminders();
+  showToast(`Tracking bus ${service} — you'll be alerted as it approaches.`);
+}
+
+function cancelOneShot() {
+  pendingOneShot = null;
+  document.getElementById("oneShotModal").classList.add("hidden");
+}
+
+function renderOneShotReminders() {
+  const container = document.getElementById("oneShotReminders");
+  if (!container) return;
+  const list = state.departureReminders.filter((r) => r.type === "oneshot");
+  if (list.length === 0) {
+    container.innerHTML =
+      '<p style="color:var(--text2);font-size:13px;">No one-shot reminders. Tap any arrival time to track that bus.</p>';
+    return;
+  }
+  container.innerHTML = list
+    .map((r) => {
+      const min = r.targetArrival
+        ? Math.max(0, Math.round((new Date(r.targetArrival) - new Date()) / 60000))
+        : null;
+      return `
+    <div class="reminder-card">
+      <div class="reminder-info">
+        <span class="reminder-value">${escapeHtml(r.nickname)}</span>
+        <span class="reminder-label">${min === null ? "Tracking" : `Due in about ${min} min`}${r.firedCount ? ` &middot; alerted ${r.firedCount}&times;` : ""}</span>
+      </div>
+      <button class="icon-btn" onclick="deleteDeptReminder('${r.id}')" title="Cancel" aria-label="Cancel one-shot reminder">&#10005;</button>
+    </div>`;
+    })
     .join("");
 }
 
@@ -1608,6 +1916,9 @@ async function checkDepartureReminders() {
   const todayDow = now.getDay();
   for (const r of state.departureReminders) {
     if (!r.enabled) continue;
+    // One-shots have no time-of-day window — they track a named vehicle, which
+    // only the server cron can follow once the app is closed.
+    if (r.type === "oneshot" || !r.time) continue;
     if (Array.isArray(r.days) && r.days.length && !r.days.includes(todayDow))
       continue;
     const [h, m] = r.time.split(":").map(Number);
@@ -2099,7 +2410,27 @@ function renderDashNearby(nearest) {
     .join("");
 }
 
-function renderDashFavourites() {
+// One card per stop, even when several services at that stop are starred —
+// two cards for the same stop would fetch the same arrivals twice and read as
+// a duplicate. `services` is the set of starred services for that stop, or
+// empty when the whole stop is starred, in which case everything shows.
+function groupFavouritesByStop(ordered) {
+  const byStop = new Map();
+  for (const f of ordered) {
+    let entry = byStop.get(f.code);
+    if (!entry) {
+      entry = { code: f.code, name: f.name, dist: f.dist, services: new Set(), all: false };
+      byStop.set(f.code, entry);
+    }
+    if (f.service) entry.services.add(f.service);
+    else entry.all = true;
+  }
+  return [...byStop.values()];
+}
+
+let dashFavServiceFilter = new Map();
+
+async function renderDashFavourites() {
   const container = document.getElementById("dashFavStops");
   const empty = document.getElementById("dashFavEmpty");
   if (!container) return;
@@ -2107,20 +2438,31 @@ function renderDashFavourites() {
   if (state.favourites.length === 0) {
     container.innerHTML = "";
     empty.classList.remove("hidden");
+    dashFavServiceFilter = new Map();
     return;
   }
   empty.classList.add("hidden");
 
-  container.innerHTML = state.favourites.map((fav, i) => `
-    <div class="card dash-stop-card" id="dash-stop-${fav.code}" data-stop="${fav.code}">
+  const groups = groupFavouritesByStop(await favouritesInDisplayOrder());
+  dashFavServiceFilter = new Map(
+    groups.map((g) => [g.code, g.all ? null : [...g.services]])
+  );
+
+  container.innerHTML = groups.map((g, i) => {
+    const svcLabel = g.all
+      ? ""
+      : `<div class="dash-stop-services">${[...g.services].map(escapeHtml).join(" · ")}</div>`;
+    return `
+    <div class="card dash-stop-card" id="dash-stop-${g.code}" data-stop="${g.code}">
       <div class="dash-stop-header">
         <div>
-          <span class="dash-stop-name">${escapeHtml(fav.name)}</span>
-          <span class="bus-stop-code">${fav.code}</span>
+          <span class="dash-stop-name">${escapeHtml(g.name)}</span>
+          <span class="bus-stop-code">${g.code}${Number.isFinite(g.dist) ? ` &middot; ${formatDist(g.dist)}` : ""}</span>
+          ${svcLabel}
         </div>
-        <button class="btn btn-ghost btn-sm" onclick="dashLoadStop('${fav.code}')">Load</button>
+        <button class="btn btn-ghost btn-sm" onclick="dashLoadStop('${g.code}')">Load</button>
       </div>
-      <div class="dash-stop-arrivals" id="dash-arrivals-${fav.code}">
+      <div class="dash-stop-arrivals" id="dash-arrivals-${g.code}">
         ${i < 3 ? `<div style="padding:4px 0;">${[0,1].map(() => `
           <div class="skeleton-row">
             <div class="skeleton skeleton-svc" style="height:18px;"></div>
@@ -2130,10 +2472,10 @@ function renderDashFavourites() {
             </div>
           </div>`).join("")}</div>` : '<div class="dash-tap-load">Tap Load to see arrivals</div>'}
       </div>
-    </div>
-  `).join("");
+    </div>`;
+  }).join("");
 
-  dashFetchQueue = state.favourites.slice(0, 3).map(f => f.code);
+  dashFetchQueue = groups.slice(0, 3).map(g => g.code);
   processDashFetchQueue();
 }
 
@@ -2200,10 +2542,19 @@ async function renderDashArrivals(stopCode, data) {
     return;
   }
 
-  const services = data.Services.map(svc => {
-    const times = [svc.NextBus, svc.NextBus2, svc.NextBus3].map(parseBusArrival);
-    return { no: svc.ServiceNo, times };
-  });
+  // When only specific services at this stop are starred, show only those —
+  // that's the whole point of a service-level favourite.
+  const filter = dashFavServiceFilter.get(stopCode);
+  const services = data.Services
+    .filter(svc => !filter || filter.includes(svc.ServiceNo))
+    .map(svc => {
+      const times = [svc.NextBus, svc.NextBus2, svc.NextBus3].map(parseBusArrival);
+      return { no: svc.ServiceNo, times };
+    });
+  if (services.length === 0) {
+    container.innerHTML = '<div class="dash-no-service">No arrivals for your saved buses right now</div>';
+    return;
+  }
   services.sort((a, b) => {
     const aMin = Math.min(...a.times.map(t => t.min ?? 999));
     const bMin = Math.min(...b.times.map(t => t.min ?? 999));
@@ -2238,7 +2589,7 @@ function stopDashAutoRefresh() {
 
 function dashRefreshAll() {
   dashArrivalCache = {};
-  dashFetchQueue = state.favourites.map(f => f.code);
+  dashFetchQueue = [...new Set(state.favourites.map(f => f.code))];
   processDashFetchQueue();
   showToast("Refreshing all stops...");
 }
@@ -2248,14 +2599,15 @@ function renderDashReminders() {
   const empty = document.getElementById("dashDeptEmpty");
   if (!container) return;
 
-  if (state.departureReminders.length === 0) {
+  const scheduled = state.departureReminders.filter((r) => r.type !== "oneshot");
+  if (scheduled.length === 0) {
     container.innerHTML = "";
     empty.classList.remove("hidden");
     return;
   }
   empty.classList.add("hidden");
 
-  container.innerHTML = state.departureReminders.map(r => {
+  container.innerHTML = scheduled.map(r => {
     const statusCls = r.enabled ? "active" : "idle";
     const statusText = r.enabled ? "Active" : "Off";
     const nextTrigger = r.enabled ? computeNextTrigger(r) : "";
@@ -2341,15 +2693,15 @@ async function loadMapStops() {
     const stops = await loadBusStops();
     stops.forEach(s => {
       if (!s.Latitude || !s.Longitude) return;
-      const isFav = state.favourites.some(f => f.code === s.BusStopCode);
-      const marker = L.marker([s.Latitude, s.Longitude], { icon: makeBusStopIcon(isFav) });
+      const starred = isFav(s.BusStopCode, null);
+      const marker = L.marker([s.Latitude, s.Longitude], { icon: makeBusStopIcon(starred) });
       marker.bindPopup(`
         <div class="popup-name">${escapeHtml(s.Description)}</div>
         <div class="popup-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
         <div class="popup-arrivals" id="popup-arr-${s.BusStopCode}"><div class="popup-arr-loading">Loading arrivals…</div></div>
         <div class="popup-actions">
           <button class="btn btn-sm" onclick="goToStop('${s.BusStopCode}')">View Arrivals</button>
-          <button class="icon-btn ${isFav ? 'active' : ''}" onclick="toggleFav('${s.BusStopCode}','${jsArg(s.Description)}')" title="Favourite">&#9733;</button>
+          <button class="icon-btn ${starred ? 'active' : ''}" onclick="toggleFav('${s.BusStopCode}','${jsArg(s.Description)}',null)" title="Favourite">&#9733;</button>
         </div>
       `);
       marker.on("popupopen", () => loadPopupArrivals(s.BusStopCode));
@@ -2576,15 +2928,25 @@ async function renderRouteStopsList() {
       if (anchorIndex !== -1 && i < anchorIndex) cls = "passed";
       else if (i === anchorIndex) cls = "current";
       const here = i === anchorIndex ? '<span class="route-here-badge">Here</span>' : "";
+      // The star here saves this service *at this stop* — the row already
+      // carries both halves of the identity, which is exactly what a
+      // service-level favourite needs.
+      const starred = isFav(s.code, routeStopsService);
       return `
-        <button class="route-stop-item ${cls}" onclick="openRouteStopDetail('${s.code}')" aria-label="${escapeHtml(s.stop.Description)}, view stop details">
-          <span class="route-stop-rail"><span class="route-stop-dot"></span></span>
-          <span class="route-stop-body">
-            <span class="route-stop-name">${escapeHtml(s.stop.Description)}${here}${stopTagsHtml(tags[i])}</span>
-            <span class="route-stop-meta">Stop ${s.seq} · ${s.code}${s.stop.RoadName ? " · " + escapeHtml(s.stop.RoadName) : ""}</span>
-          </span>
-          <span class="route-stop-chevron" aria-hidden="true">›</span>
-        </button>`;
+        <div class="route-stop-item ${cls}">
+          <button class="route-stop-main" onclick="openRouteStopDetail('${s.code}')" aria-label="${escapeHtml(s.stop.Description)}, view stop details">
+            <span class="route-stop-rail"><span class="route-stop-dot"></span></span>
+            <span class="route-stop-body">
+              <span class="route-stop-name">${escapeHtml(s.stop.Description)}${here}${stopTagsHtml(tags[i])}</span>
+              <span class="route-stop-meta">Stop ${s.seq} · ${s.code}${s.stop.RoadName ? " · " + escapeHtml(s.stop.RoadName) : ""}</span>
+            </span>
+            <span class="route-stop-chevron" aria-hidden="true">›</span>
+          </button>
+          <button class="icon-btn route-stop-fav ${starred ? "active" : ""}"
+                  onclick="toggleFavService('${s.code}','${jsArg(routeStopsService)}').then(renderRouteStopsList)"
+                  title="Favourite bus ${escapeHtml(routeStopsService)} here"
+                  aria-label="Favourite bus ${escapeHtml(routeStopsService)} at ${escapeHtml(s.stop.Description)}">&#9733;</button>
+        </div>`;
     })
     .join("");
 
@@ -2765,7 +3127,9 @@ async function findNearbyStops(scope = "arrivals") {
 // permission, surface nearby stops as top suggestions without prompting.
 function handleSearchFocus(scope = "arrivals") {
   const cfg = SEARCH_SCOPES[scope];
-  if (!document.getElementById(cfg.input).value.trim()) maybeSuggestNearby(scope);
+  if (document.getElementById(cfg.input).value.trim()) return;
+  renderRecentSearches(scope);
+  maybeSuggestNearby(scope);
 }
 
 async function maybeSuggestNearby(scope = "arrivals") {
@@ -3134,6 +3498,7 @@ async function pushPrefsNow() {
       body: JSON.stringify({
         data: {
           favourites: state.favourites,
+          recentSearches: state.recentSearches,
           places: state.places,
           dropoffAlerts: state.dropoffAlerts,
           settings: {
@@ -3181,6 +3546,10 @@ async function restorePrefs() {
       if (Array.isArray(data.favourites)) {
         state.favourites = data.favourites;
         localStorage.setItem(FAV_KEY, JSON.stringify(state.favourites));
+      }
+      if (Array.isArray(data.recentSearches)) {
+        state.recentSearches = data.recentSearches.slice(0, RECENT_MAX);
+        localStorage.setItem(RECENT_KEY, JSON.stringify(state.recentSearches));
       }
       if (data.places && typeof data.places === "object") {
         state.places = sanitizePlaces(data.places);

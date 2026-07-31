@@ -316,6 +316,17 @@
       justify-content: center;
       transition: background 0.3s, color 0.3s;
     }
+    /* Live chips are <button>s (tap to track that bus); the inactive ones and
+       the map-popup copies are still <span>s. Reset the UA button styling so
+       both render identically. */
+    button.arrival-badge {
+      font-family: inherit;
+      border: none;
+      cursor: pointer;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    button.arrival-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .arrival-badge.arriving { background: rgba(16,185,129,0.1); color: var(--green); }
     .arrival-badge.soon { background: rgba(245,158,11,0.1); color: var(--yellow); }
     .arrival-badge.later { background: rgba(13,148,136,0.08); color: var(--accent); }
@@ -423,6 +434,55 @@
     .fav-item:hover { border-color: rgba(13,148,136,0.3); }
     .fav-name { font-weight: 700; font-size: 15px; }
     .fav-detail { font-size: 13px; color: var(--text2); margin-top: 2px; }
+    .fav-service {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: rgba(13,148,136,0.12);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      vertical-align: middle;
+    }
+    .dash-stop-services { font-size: 12px; color: var(--accent); font-weight: 600; }
+
+    /* ── Recent searches ── */
+    .recent-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px 4px;
+    }
+    .recent-header h4 {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text2);
+      margin: 0;
+    }
+    .recent-clear {
+      border: 0;
+      background: none;
+      color: var(--accent);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      padding: 2px 4px;
+    }
+    .recent-item { display: flex; align-items: center; gap: 10px; }
+    .recent-item .search-result-item { flex: 1; min-width: 0; }
+    .recent-icon { flex: 0 0 auto; padding-left: 12px; font-size: 14px; }
+    .recent-remove {
+      flex: 0 0 auto;
+      border: 0;
+      background: none;
+      color: var(--text2);
+      font-size: 13px;
+      cursor: pointer;
+      padding: 8px 12px;
+    }
     .fav-icon {
       width: 40px;
       height: 40px;
@@ -591,23 +651,34 @@
       margin: 0 -4px;
       padding: 0 4px;
     }
+    /* The row is a container now, not a button: it holds the tap-to-open
+       target and a separate star, and a button can't nest inside a button. */
     .route-stop-item {
       display: flex;
       align-items: center;
-      gap: 12px;
       width: 100%;
-      text-align: left;
-      background: none;
-      border: none;
       padding: 2px 8px;
-      cursor: pointer;
       color: var(--text);
-      font-family: inherit;
       border-radius: 10px;
       position: relative;
     }
+    .route-stop-main {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex: 1;
+      min-width: 0;
+      text-align: left;
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      color: inherit;
+      font-family: inherit;
+    }
     .route-stop-item:hover,
-    .route-stop-item:focus-visible { background: var(--surface2); outline: none; }
+    .route-stop-main:focus-visible { background: var(--surface2); outline: none; }
+    .route-stop-fav { flex: 0 0 auto; margin-left: 6px; }
     /* timeline rail */
     .route-stop-rail {
       position: relative;
@@ -1565,6 +1636,11 @@
         <div id="modesContainer" style="margin-top:12px;"></div>
       </div>
       <div class="card" style="margin-top:12px;">
+        <h3>Tracking Now</h3>
+        <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">One-shot reminders for a specific bus. Tap any arrival time in the Search tab to start one &mdash; it alerts you as that bus approaches, then deletes itself.</p>
+        <div id="oneShotReminders"></div>
+      </div>
+      <div class="card" style="margin-top:12px;">
         <h3>Departure Reminders</h3>
         <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">Get notified when your bus is arriving so you know when to leave.</p>
         <button class="btn" onclick="openDepartureReminderModal()" data-i18n="reminders.addDeparture">+ Add Departure Reminder</button>
@@ -1721,6 +1797,22 @@
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="document.getElementById('modeModal').classList.add('hidden')">Cancel</button>
         <button class="btn" onclick="saveMode()">Save Mode</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ONE-SHOT REMINDER CONFIRM -->
+  <div id="oneShotModal" class="modal-overlay hidden" onclick="closeModal(event, 'oneShotModal')" role="dialog" aria-modal="true" aria-labelledby="oneShotTitle">
+    <div class="modal" onclick="event.stopPropagation()">
+      <h3 id="oneShotTitle">Track this bus?</h3>
+      <p id="oneShotSummary" style="font-size:14px;line-height:1.6;margin:10px 0 4px;"></p>
+      <p style="font-size:12px;color:var(--text2);margin-top:10px;">
+        You'll get a push as it gets close, roughly every 3 minutes, even with the app closed.
+        It stops on its own when the bus arrives &mdash; or tap Dismiss on any alert.
+      </p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="cancelOneShot()">Cancel</button>
+        <button class="btn" onclick="confirmOneShot()">Track it</button>
       </div>
     </div>
   </div>
