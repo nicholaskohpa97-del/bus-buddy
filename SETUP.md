@@ -1,9 +1,31 @@
-# Bus Buddy — Background Alerts Setup
+# Bus Buddy — Setup
 
-Departure reminders fire even when the app is closed via **Web Push**. A server
-job checks LTA arrivals and pushes to the device. This requires a one-time setup.
+Bus Buddy needs a Supabase project (accounts + server state), an LTA DataMall
+key (bus data), and VAPID keys (Web Push). Everything below is one-time setup.
 
-## 1. Generate VAPID keys
+## 1. Accounts (Supabase Auth)
+
+Sign-in is **required** — there is no guest mode. Identity used to be a random
+`bb_deviceId` in localStorage, which made cross-device sync impossible and left
+journey modes in a single row shared by every visitor to the deployment.
+
+In your Supabase project:
+
+1. **Authentication → Providers → Email** — enable it. Set **Minimum password
+   length** to `8`, to match the rule the client enforces. (The client also
+   requires at least one letter and one number; Supabase can't express that, so
+   the client check is the only place it's enforced — that's fine, it's a
+   usability rule, not a security boundary.)
+2. **Authentication → Providers → Google** — enable it and paste in a Google
+   OAuth client ID/secret from the
+   [Google Cloud console](https://console.cloud.google.com/apis/credentials).
+   Add `https://<your-project>.supabase.co/auth/v1/callback` as an authorised
+   redirect URI on the Google side.
+3. **Authentication → URL Configuration** — set **Site URL** to your deployed
+   origin (e.g. `https://bus-buddy.vercel.app`) and add it under **Redirect
+   URLs**. Google sign-in and password resets both land back here.
+
+## 2. Generate VAPID keys
 
 ```bash
 npx web-push generate-vapid-keys
@@ -11,35 +33,136 @@ npx web-push generate-vapid-keys
 
 This prints a `Public Key` and `Private Key`.
 
-## 2. Environment variables (Vercel → Project → Settings → Environment Variables)
+## 3. Environment variables
 
-| Variable             | Value                                                        |
-| -------------------- | ----------------------------------------------------------- |
-| `VAPID_PUBLIC_KEY`   | public key from step 1                                       |
-| `VAPID_PRIVATE_KEY`  | private key from step 1                                      |
-| `VAPID_SUBJECT`      | `mailto:you@example.com`                                     |
-| `CRON_SECRET`        | a long random string (protects the check endpoint)          |
-| `SUPABASE_URL`       | already set (used by journey modes)                         |
-| `SUPABASE_ANON_KEY`  | already set                                                 |
-| `LTA_API_KEY`        | already set                                                 |
+Vercel → Project → Settings → Environment Variables.
+
+| Variable                    | Value                                                          |
+| --------------------------- | -------------------------------------------------------------- |
+| `SUPABASE_URL`              | `https://<project>.supabase.co`                                  |
+| `SUPABASE_ANON_KEY`         | project **anon / publishable** key — served to the browser       |
+| `SUPABASE_SERVICE_ROLE_KEY` | project **service role / secret** key — server-only, never sent to the browser |
+| `LTA_API_KEY`               | from datamall.lta.gov.sg → Request for API Access                |
+| `VAPID_PUBLIC_KEY`          | public key from step 2                                           |
+| `VAPID_PRIVATE_KEY`         | private key from step 2                                          |
+| `VAPID_SUBJECT`             | `mailto:you@example.com`                                         |
+| `CRON_SECRET`               | a long random string (protects the check endpoint)               |
+| `TELEGRAM_BOT_TOKEN`        | optional — only if you use the Telegram bot                      |
+| `TELEGRAM_WEBHOOK_SECRET`   | optional but strongly recommended alongside the bot (see §6)     |
+
+`SUPABASE_SERVICE_ROLE_KEY` is new and **required**. Once row-level security is
+on, the anon key can only ever see the calling user's own rows — which is the
+point — but the reminder cron has no user, and has to read across every
+account. That one path uses the service key; everything user-facing goes
+through the caller's own JWT so RLS does the scoping.
 
 Redeploy after adding these.
 
-## 3. Supabase table
+## 4. Database schema
 
-Run in the Supabase SQL editor:
+Run this in the Supabase SQL editor. It replaces the old `push_subs` and
+`modes` tables.
 
 ```sql
-create table if not exists push_subs (
-  device_id  text primary key,
+-- ── Clean up the pre-accounts schema ─────────────────────────────────────
+-- The old push_subs was keyed by a device id with no user column, and modes
+-- was a single global row (id = 1) shared by everyone. Neither can be
+-- migrated to a user_id that was never recorded.
+drop table if exists push_subs;
+drop table if exists modes;
+
+-- ── Preferences: favourites, places, recent searches, settings ───────────
+create table if not exists user_prefs (
+  user_id    uuid primary key references auth.users(id) on delete cascade,
   data       jsonb not null default '{}'::jsonb,
   updated_at timestamptz not null default now()
 );
+
+-- ── Push targets: one row per (account, device) ──────────────────────────
+create table if not exists push_subs (
+  id           uuid primary key default gen_random_uuid(),
+  user_id      uuid not null references auth.users(id) on delete cascade,
+  device_id    text not null,
+  subscription jsonb,
+  updated_at   timestamptz not null default now(),
+  unique (user_id, device_id)
+);
+
+-- ── Reminders: 'scheduled' (recurring) or 'oneshot' (one named bus) ──────
+create table if not exists reminders (
+  id           uuid primary key default gen_random_uuid(),
+  user_id      uuid not null references auth.users(id) on delete cascade,
+  type         text not null default 'scheduled',
+  payload      jsonb not null default '{}'::jsonb,
+  notify_state jsonb not null default '{}'::jsonb,
+  updated_at   timestamptz not null default now()
+);
+create index if not exists reminders_user_idx on reminders (user_id);
+
+-- ── Journey modes ────────────────────────────────────────────────────────
+create table if not exists modes (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references auth.users(id) on delete cascade,
+  data       jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+create index if not exists modes_user_idx on modes (user_id);
+
+-- ── Telegram pairing ─────────────────────────────────────────────────────
+-- A webhook carries a chat id and nothing else, so the bot can't know which
+-- account is typing. The app mints a short-lived code the user sends to the
+-- bot once; the bot trades it for a user_id and remembers the pairing.
+create table if not exists tg_links (
+  chat_id   bigint primary key,
+  user_id   uuid not null references auth.users(id) on delete cascade,
+  linked_at timestamptz not null default now()
+);
+create table if not exists tg_link_codes (
+  code       text primary key,
+  user_id    uuid not null references auth.users(id) on delete cascade,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+create table if not exists tg_sessions (
+  chat_id    bigint primary key,
+  data       jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+-- ── Row-level security ───────────────────────────────────────────────────
+alter table user_prefs    enable row level security;
+alter table push_subs     enable row level security;
+alter table reminders     enable row level security;
+alter table modes         enable row level security;
+alter table tg_links      enable row level security;
+alter table tg_link_codes enable row level security;
+alter table tg_sessions   enable row level security;
+
+create policy "own prefs"     on user_prefs for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "own subs"      on push_subs  for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "own reminders" on reminders  for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "own modes"     on modes      for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "own tg links"  on tg_links   for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- tg_link_codes and tg_sessions get no policy at all: RLS with zero policies
+-- denies everything to anon/authenticated, and only the service key (which
+-- bypasses RLS) touches them. That's deliberate — a link code must be
+-- redeemable by the bot, which has no session.
 ```
 
-`data` holds `{ subscription, reminders, notifyState }` per device.
+### A note on existing favourites
 
-## 4. Schedule the reminder check (Vercel Hobby)
+Favourites are **not** migrated. The old rows are keyed by a device id with no
+account attached, so there is no correct user to assign them to, and the shape
+changed (a favourite is now a stop *or* a specific service at a stop). The app
+clears the old local list once, with a toast, and starts fresh.
+
+## 5. Schedule the reminder check (Vercel Hobby)
 
 Hobby cron only runs ~once a day, which is too slow for arrival alerts. Use a
 free external pinger to call the endpoint every minute:
@@ -59,12 +182,43 @@ free external pinger to call the endpoint every minute:
 > (`{ "path": "/api/check-reminders", "schedule": "* * * * *" }`) and drop the
 > external pinger — the endpoint also accepts Vercel's own cron header.
 
-## 5. Verify
+## 6. Telegram bot (optional)
 
-1. Open the app on your phone, allow notifications. Settings should show
-   **"✅ Background alerts enabled"**.
-2. Tap **Settings → Test background alert**, lock your phone — the notification
-   should still arrive (it came from the server).
-3. Create a departure reminder; it syncs to `push_subs.data.reminders`.
-4. When the bus is within your lead time during the reminder window, you get a
-   push even with the app closed.
+Register the webhook with a secret token, so a leaked URL isn't enough to
+impersonate a linked chat:
+
+```bash
+curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+  -d "url=https://<your-app>.vercel.app/api/telegram" \
+  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
+```
+
+Then in the app: **Settings → Telegram → Get link code**, and send
+`/link <CODE>` to the bot within 10 minutes.
+
+## 7. Verify
+
+1. **Accounts** — sign up with email/password (a 6-character password should be
+   rejected client-side), then sign in with Google. Confirm the app is
+   unreachable while signed out. In Supabase, check that new rows carry a
+   `user_id`, and that a second account can't see the first's rows.
+2. **Push** — open the app on your phone, allow notifications. Settings should
+   show **"✅ Background alerts enabled"**. Sign in on a second device and
+   confirm **Settings → Test background alert** reaches both.
+3. **Reminders** — create a departure reminder; confirm a row appears in
+   `reminders`. When the bus is within your lead time during the reminder
+   window, you get a push even with the app closed.
+4. **Config health** — `GET /api/check-reminders?probe=1` with
+   `Authorization: Bearer $CRON_SECRET` reports env-var and DB health without
+   sending anything.
+
+## Local development
+
+```bash
+node local/server.js   # http://localhost:3456
+```
+
+`local/server.js` only implements `check-key`, `bus-arrival`, `bus-stops`,
+`bus-routes` and `geocode`. Anything account-backed (`config`, `prefs`,
+`reminders`, `push`, `modes`) needs a real Supabase project, so sign-in and
+sync are not exercisable offline — run those against a preview deployment.

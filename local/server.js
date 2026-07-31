@@ -23,12 +23,10 @@ async function handleAPI(req, res, pathname) {
     return json(res, { hasKey: !!LTA_API_KEY });
   }
 
-  if (pathname === "/api/set-key" && req.method === "POST") {
-    const body = await readBody(req);
-    LTA_API_KEY = body.key || "";
-    return json(res, { ok: true });
-  }
-
+  // Account-backed endpoints (config, prefs, reminders, push, modes) need a
+  // real Supabase project, so they are deliberately not stubbed here — a fake
+  // session would let bugs in the auth gating pass unnoticed locally. Run
+  // those against a preview deployment instead.
   if (pathname === "/api/bus-arrival") {
     if (!LTA_API_KEY) return json(res, { error: "API key not set" }, 400);
     const stop = url.searchParams.get("BusStopCode");

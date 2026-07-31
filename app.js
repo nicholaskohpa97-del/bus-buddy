@@ -14,12 +14,25 @@ function sanitizePlaces(places) {
   return clean;
 }
 
+// Reminders and modes are rows in Postgres now, with uuid primary keys, so
+// ids have to be minted as uuids rather than the old `Date.now()` strings.
+function newId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  // Safari < 15.4 has crypto.getRandomValues but not randomUUID.
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, "0"));
+  return `${h.slice(0, 4).join("")}-${h.slice(4, 6).join("")}-${h.slice(6, 8).join("")}-${h.slice(8, 10).join("")}-${h.slice(10, 16).join("")}`;
+}
+
+const FAV_KEY = "bb_favourites";
+
 // ── State ──
 let state = {
-  apiKey: localStorage.getItem("bb_apiKey") || "",
   refreshSec: parseInt(localStorage.getItem("bb_refreshSec") || "30"),
   reminderLeadMin: parseInt(localStorage.getItem("bb_reminderLead") || "5"),
-  favourites: JSON.parse(localStorage.getItem("bb_favourites") || "[]"),
+  favourites: JSON.parse(localStorage.getItem(FAV_KEY) || "[]"),
   departureReminders: JSON.parse(localStorage.getItem("bb_deptReminders") || "[]"),
   dropoffAlerts: JSON.parse(localStorage.getItem("bb_dropoffAlerts") || "[]"),
   modes: JSON.parse(localStorage.getItem("bb_modes") || "[]"),
@@ -127,16 +140,10 @@ function dismissInstall() {
 }
 
 // ── Init ──
-document.addEventListener("DOMContentLoaded", async () => {
-  initTheme();
-  const keyCheck = await fetch("/api/check-key").then(r => r.json()).catch(() => ({ hasKey: false }));
-  if (keyCheck.hasKey) {
-    document.getElementById("apiKeyBar").classList.add("hidden");
-  } else if (state.apiKey) {
-    await setApiKey(state.apiKey);
-    document.getElementById("apiKeyBar").classList.add("hidden");
-  }
-  document.getElementById("apiKeyInput").value = state.apiKey;
+// Not a DOMContentLoaded handler any more: auth.js owns startup and calls this
+// only once there's a signed-in user, so no render path ever runs without a
+// user_id to scope its data to.
+async function bootstrapApp() {
   document.getElementById("refreshInterval").value = state.refreshSec;
   document.getElementById("reminderLead").value = state.reminderLeadMin;
   document
@@ -149,29 +156,23 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderDepartureReminders();
   renderDropoffAlerts();
   renderPlaces();
-  loadModes();
   refreshDashboard();
   startDashAutoRefresh();
   requestNotificationPermission();
   initPush();
-  restorePrefs();
+  // Server state first: this account may have favourites and reminders set on
+  // another device that this one has never seen.
+  await restorePrefs();
+  loadModes();
   startDepartureChecker();
   startArrivalTicker();
   maybeShowOnboarding();
   document.addEventListener('click', unlockAudio, { once: true });
   document.addEventListener('touchstart', unlockAudio, { once: true });
   if (window.__hideSplash) window.__hideSplash();
-});
-
-// ── API ──
-async function setApiKey(key) {
-  await fetch("/api/set-key", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key }),
-  });
 }
 
+// ── API ──
 async function fetchArrivals(stopCode, serviceNo) {
   let url = `/api/bus-arrival?BusStopCode=${stopCode}`;
   if (serviceNo) url += `&ServiceNo=${serviceNo}`;
@@ -663,7 +664,7 @@ async function handleSearch(val, scope = "arrivals") {
           html += services
             .map(
               (no) => `
-            <div class="search-result-item search-result-item-service" onclick="selectService('${escapeHtml(no)}','${scope}')">
+            <div class="search-result-item search-result-item-service" onclick="selectService('${jsArg(no)}','${scope}')">
               <div class="search-result-name">&#128652; Bus ${escapeHtml(no)}</div>
               <div class="search-result-detail">Tap to view route &amp; stops</div>
             </div>`
@@ -1078,10 +1079,10 @@ async function loadArrivals(stopCode) {
         <div class="card">
           <div class="bus-stop-header">
             <div>
-              <h3>${stopName}</h3>
+              <h3>${escapeHtml(stopName)}</h3>
               <span class="bus-stop-code">${stopCode}</span>
             </div>
-            <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${escapeHtml(stopName)}')" title="Favourite">&#9733;</button>
+            <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${jsArg(stopName)}')" title="Favourite">&#9733;</button>
           </div>
           <div class="empty-state"><p>No bus services at this time.</p></div>
         </div>`;
@@ -1092,12 +1093,12 @@ async function loadArrivals(stopCode) {
       <div class="card">
         <div class="bus-stop-header">
           <div>
-            <h3>${stopName}</h3>
+            <h3>${escapeHtml(stopName)}</h3>
             <span class="bus-stop-code">${stopCode}</span>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <div class="auto-refresh"><div class="dot"></div> Live</div>
-            <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${escapeHtml(stopName)}')" title="Favourite">&#9733;</button>
+            <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${jsArg(stopName)}')" title="Favourite">&#9733;</button>
           </div>
         </div>
         ${activeServices.length === 0 ? '<div class="empty-state" style="padding:16px 0;"><p>No bus services at this time.</p></div>' : ""}
@@ -1185,7 +1186,7 @@ function renderServiceRow(svc, stopCode, routeRow) {
   return `
     <div class="service-row">
       <div class="service-number-wrap">
-        <button class="service-number" onclick="event.stopPropagation();openRouteStops('${svc.no}','${stopCode}')" aria-label="View stops for bus ${svc.no}">${svc.no}</button>
+        <button class="service-number" onclick="event.stopPropagation();openRouteStops('${svc.no}','${stopCode}')" aria-label="View stops for bus ${escapeHtml(svc.no)}">${escapeHtml(svc.no)}</button>
         ${scheduleLineHtml(sched)}
       </div>
       <div class="arrival-times">${badges}</div>
@@ -1222,7 +1223,7 @@ function renderInactiveServiceRow(serviceNo, stopCode, routeRow) {
   return `
     <div class="service-row service-row--inactive">
       <div class="service-number-wrap">
-        <button class="service-number" onclick="event.stopPropagation();openRouteStops('${serviceNo}','${stopCode}')" aria-label="View stops for bus ${serviceNo}">${serviceNo}</button>
+        <button class="service-number" onclick="event.stopPropagation();openRouteStops('${serviceNo}','${stopCode}')" aria-label="View stops for bus ${escapeHtml(serviceNo)}">${escapeHtml(serviceNo)}</button>
         ${scheduleLineHtml(sched)}
       </div>
       <div class="arrival-times"><span class="arrival-badge na${ended ? " last-bus" : ""}"><span class="time-text">${escapeHtml(status)}</span></span></div>
@@ -1268,7 +1269,7 @@ function toggleFav(code, name) {
     state.favourites.push({ code, name });
     showToast("Added to favourites");
   }
-  localStorage.setItem("bb_favourites", JSON.stringify(state.favourites));
+  localStorage.setItem(FAV_KEY, JSON.stringify(state.favourites));
   renderFavourites();
   refreshDashboard();
   syncPrefs();
@@ -1289,10 +1290,10 @@ function renderFavourites() {
       (f) => `
     <div class="fav-item" onclick="goToStop('${f.code}')">
       <div>
-        <div class="fav-name">${f.name}</div>
+        <div class="fav-name">${escapeHtml(f.name)}</div>
         <div class="fav-detail">${f.code}</div>
       </div>
-      <button class="icon-btn" onclick="event.stopPropagation();toggleFav('${f.code}','${escapeHtml(f.name)}')" title="Remove">&#10005;</button>
+      <button class="icon-btn" onclick="event.stopPropagation();toggleFav('${f.code}','${jsArg(f.name)}')" title="Remove">&#10005;</button>
     </div>`
     )
     .join("");
@@ -1500,7 +1501,8 @@ function openDepartureReminderModal() {
 
 function saveDepartureReminder() {
   const reminder = {
-    id: Date.now().toString(36),
+    id: newId(),
+    type: "scheduled",
     stop: document.getElementById("deptStop").value.trim(),
     service: document.getElementById("deptService").value.trim(),
     time: document.getElementById("deptTime").value,
@@ -1565,8 +1567,8 @@ function renderDepartureReminders() {
       (r) => `
     <div class="reminder-card">
       <div class="reminder-info">
-        <span class="reminder-value">${r.nickname}</span>
-        <span class="reminder-label">Bus ${r.service} @ stop ${r.stop} &middot; Leave by ${r.time} &middot; Alert ${r.leadMin}min before</span>
+        <span class="reminder-value">${escapeHtml(r.nickname)}</span>
+        <span class="reminder-label">Bus ${escapeHtml(r.service)} @ stop ${escapeHtml(r.stop)} &middot; Leave by ${escapeHtml(r.time)} &middot; Alert ${escapeHtml(r.leadMin)}min before</span>
         <span class="reminder-label reminder-days">&#128197; ${daysSummary(r.days)}</span>
       </div>
       <div style="display:flex;gap:4px;">
@@ -1591,8 +1593,15 @@ function startDepartureChecker() {
   deptCheckTimer = setInterval(checkDepartureReminders, 30000);
 }
 
+// This checker was dead code in production: it early-returned on an empty
+// state.apiKey, which was always empty once the key moved to a server env var.
+// Reviving it needs a cooldown, or a reminder in its window would re-fire
+// every 30 seconds. One hour matches the server cron so the two agree about
+// what "already alerted you about this" means.
+const FOREGROUND_COOLDOWN_MS = 60 * 60 * 1000;
+const foregroundLastFired = new Map();
+
 async function checkDepartureReminders() {
-  if (!state.apiKey) return;
   const now = new Date();
   const nowMins = now.getHours() * 60 + now.getMinutes();
 
@@ -1607,6 +1616,8 @@ async function checkDepartureReminders() {
     const windowEnd = targetMins + 10;
 
     if (nowMins < windowStart || nowMins > windowEnd) continue;
+    if (Date.now() - (foregroundLastFired.get(r.id) || 0) < FOREGROUND_COOLDOWN_MS)
+      continue;
 
     try {
       const data = await fetchArrivals(r.stop, r.service);
@@ -1614,6 +1625,7 @@ async function checkDepartureReminders() {
       const svc = data.Services[0];
       const next = parseBusArrival(svc.NextBus);
       if (next.min !== null && next.min <= r.leadMin) {
+        foregroundLastFired.set(r.id, Date.now());
         sendNotification(
           `Bus ${r.service} arriving in ${next.min} min!`,
           `${r.nickname} - Time to head to stop ${r.stop}`
@@ -1631,7 +1643,7 @@ function openDropoffModal() {
 
 function saveDropoffAlert() {
   const alert = {
-    id: Date.now().toString(36),
+    id: newId(),
     stopCode: document.getElementById("dropoffStopCode").value.trim(),
     radius: parseInt(document.getElementById("dropoffRadius").value) || 300,
     nickname:
@@ -1652,6 +1664,7 @@ function saveDropoffAlert() {
   renderDropoffAlerts();
   refreshDashboard();
   resolveDropoffCoords(alert);
+  syncPrefs();
   showToast("Drop-off alert saved");
 }
 
@@ -1666,6 +1679,7 @@ async function resolveDropoffCoords(alert) {
         "bb_dropoffAlerts",
         JSON.stringify(state.dropoffAlerts)
       );
+      syncPrefs();
     }
   } catch {}
 }
@@ -1678,6 +1692,7 @@ function deleteDropoffAlert(id) {
   );
   renderDropoffAlerts();
   refreshDashboard();
+  syncPrefs();
   if (activeDropoff && activeDropoff.id === id) stopDropoff();
 }
 
@@ -1694,8 +1709,8 @@ function renderDropoffAlerts() {
       (a) => `
     <div class="reminder-card">
       <div class="reminder-info">
-        <span class="reminder-value">${a.nickname}</span>
-        <span class="reminder-label">Stop ${a.stopCode} &middot; ${a.radius}m radius ${a.lat ? "&#9989;" : "&#9888; resolving coords..."}</span>
+        <span class="reminder-value">${escapeHtml(a.nickname)}</span>
+        <span class="reminder-label">Stop ${escapeHtml(a.stopCode)} &middot; ${escapeHtml(a.radius)}m radius ${a.lat ? "&#9989;" : "&#9888; resolving coords..."}</span>
       </div>
       <div style="display:flex;gap:4px;">
         <button class="btn btn-sm ${activeDropoff && activeDropoff.id === a.id ? "btn-danger" : ""}" onclick="${activeDropoff && activeDropoff.id === a.id ? "stopDropoff()" : `startDropoff('${a.id}')`}">
@@ -1809,9 +1824,8 @@ function haversine(lat1, lon1, lat2, lon2) {
 async function postModes(modes) {
   localStorage.setItem("bb_modes", JSON.stringify(modes));
   try {
-    await fetch("/api/modes", {
+    await authFetch("/api/modes", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(modes),
     });
   } catch {}
@@ -1819,7 +1833,7 @@ async function postModes(modes) {
 
 async function loadModes() {
   try {
-    const remote = await fetch("/api/modes").then(r => r.json());
+    const remote = await authFetch("/api/modes").then(r => r.json());
     if (Array.isArray(remote)) {
       state.modes = remote;
       localStorage.setItem("bb_modes", JSON.stringify(remote));
@@ -1848,7 +1862,7 @@ async function saveMode() {
   }
 
   const mode = {
-    id: Date.now().toString(36),
+    id: newId(),
     name,
     departureStop,
     service,
@@ -1893,9 +1907,9 @@ function renderModes() {
   container.innerHTML = state.modes.map(m => `
     <div class="reminder-card${m.active ? " reminder-card--active" : ""}">
       <div class="reminder-info">
-        <span class="reminder-value">${m.name}</span>
-        <span class="reminder-label">&#128652; Bus ${m.service} from stop ${m.departureStop} &middot; Leave by ${m.leaveTime} &middot; ${m.leadMin}min alert</span>
-        <span class="reminder-label">&#128205; Drop-off stop ${m.dropoffStop} &middot; ${m.dropoffRadius}m ${m.dropoffLat ? "&#9989;" : "&#9888; resolving..."}</span>
+        <span class="reminder-value">${escapeHtml(m.name)}</span>
+        <span class="reminder-label">&#128652; Bus ${escapeHtml(m.service)} from stop ${escapeHtml(m.departureStop)} &middot; Leave by ${escapeHtml(m.leaveTime)} &middot; ${escapeHtml(m.leadMin)}min alert</span>
+        <span class="reminder-label">&#128205; Drop-off stop ${escapeHtml(m.dropoffStop)} &middot; ${escapeHtml(m.dropoffRadius)}m ${m.dropoffLat ? "&#9989;" : "&#9888; resolving..."}</span>
       </div>
       <div style="display:flex;gap:4px;align-items:center;">
         <button class="btn btn-sm${m.active ? " btn-danger" : ""}" onclick="${m.active ? `deactivateMode('${m.id}')` : `activateMode('${m.id}')`}">
@@ -1917,8 +1931,14 @@ async function activateMode(id) {
     return;
   }
 
+  // The derived reminder used to take the id `mode_<modeId>`, which is no
+  // longer a legal primary key. Reuse the existing derived row's id when
+  // re-activating so its firing history survives, and only mint a new one the
+  // first time.
+  const prevReminder = state.departureReminders.find((r) => r.fromMode === mode.id);
   const reminder = {
-    id: `mode_${mode.id}`,
+    id: prevReminder?.id || newId(),
+    type: "scheduled",
     stop: mode.departureStop,
     service: mode.service,
     time: mode.leaveTime,
@@ -1931,8 +1951,9 @@ async function activateMode(id) {
   state.departureReminders.push(reminder);
   localStorage.setItem("bb_deptReminders", JSON.stringify(state.departureReminders));
 
+  const prevDropoff = state.dropoffAlerts.find((a) => a.fromMode === mode.id);
   const dropoff = {
-    id: `mode_${mode.id}_drop`,
+    id: prevDropoff?.id || newId(),
     stopCode: mode.dropoffStop,
     radius: mode.dropoffRadius,
     nickname: mode.name,
@@ -1947,7 +1968,8 @@ async function activateMode(id) {
   mode.active = true;
   await postModes(state.modes);
   syncPushReminders();
-  startDropoff(`mode_${mode.id}_drop`);
+  syncPrefs();
+  startDropoff(dropoff.id);
   renderModes();
   renderDepartureReminders();
 }
@@ -1956,7 +1978,7 @@ async function deactivateMode(id) {
   const mode = state.modes.find(m => m.id === id);
   if (!mode) return;
 
-  if (activeDropoff && activeDropoff.id === `mode_${mode.id}_drop`) stopDropoff();
+  if (activeDropoff && activeDropoff.fromMode === mode.id) stopDropoff();
   state.departureReminders = state.departureReminders.filter(r => r.fromMode !== mode.id);
   localStorage.setItem("bb_deptReminders", JSON.stringify(state.departureReminders));
   state.dropoffAlerts = state.dropoffAlerts.filter(a => a.fromMode !== mode.id);
@@ -1965,6 +1987,7 @@ async function deactivateMode(id) {
   mode.active = false;
   await postModes(state.modes);
   syncPushReminders();
+  syncPrefs();
   renderModes();
   renderDepartureReminders();
   renderDropoffAlerts();
@@ -2092,7 +2115,7 @@ function renderDashFavourites() {
     <div class="card dash-stop-card" id="dash-stop-${fav.code}" data-stop="${fav.code}">
       <div class="dash-stop-header">
         <div>
-          <span class="dash-stop-name">${fav.name}</span>
+          <span class="dash-stop-name">${escapeHtml(fav.name)}</span>
           <span class="bus-stop-code">${fav.code}</span>
         </div>
         <button class="btn btn-ghost btn-sm" onclick="dashLoadStop('${fav.code}')">Load</button>
@@ -2239,10 +2262,10 @@ function renderDashReminders() {
     return `
       <div class="card dash-reminder-card ${r.enabled ? '' : 'dash-disabled'}">
         <div class="dash-reminder-top">
-          <span class="reminder-value">${r.nickname}</span>
+          <span class="reminder-value">${escapeHtml(r.nickname)}</span>
           <span class="reminder-status ${statusCls}">${statusText}</span>
         </div>
-        <div class="reminder-label">Bus ${r.service} @ stop ${r.stop} &middot; Leave by ${r.time} &middot; Alert ${r.leadMin}min before</div>
+        <div class="reminder-label">Bus ${escapeHtml(r.service)} @ stop ${escapeHtml(r.stop)} &middot; Leave by ${escapeHtml(r.time)} &middot; Alert ${escapeHtml(r.leadMin)}min before</div>
         ${nextTrigger ? `<div class="dash-next-trigger">${nextTrigger}</div>` : ""}
       </div>`;
   }).join("");
@@ -2278,8 +2301,8 @@ function renderDashDropoffs() {
         <div style="display:flex;align-items:center;gap:8px;">
           ${isActive ? '<div class="pulse"></div>' : ''}
           <div>
-            <div class="reminder-value">${a.nickname}</div>
-            <div class="reminder-label">Stop ${a.stopCode} &middot; ${a.radius}m radius${isActive ? ' &middot; Tracking' : ''}${a.lat ? '' : ' &middot; &#9888; resolving...'}</div>
+            <div class="reminder-value">${escapeHtml(a.nickname)}</div>
+            <div class="reminder-label">Stop ${escapeHtml(a.stopCode)} &middot; ${escapeHtml(a.radius)}m radius${isActive ? ' &middot; Tracking' : ''}${a.lat ? '' : ' &middot; &#9888; resolving...'}</div>
           </div>
         </div>
         <button class="btn btn-sm ${isActive ? 'btn-danger' : 'btn-ghost'}"
@@ -2321,12 +2344,12 @@ async function loadMapStops() {
       const isFav = state.favourites.some(f => f.code === s.BusStopCode);
       const marker = L.marker([s.Latitude, s.Longitude], { icon: makeBusStopIcon(isFav) });
       marker.bindPopup(`
-        <div class="popup-name">${s.Description}</div>
-        <div class="popup-detail">${s.BusStopCode} &middot; ${s.RoadName}</div>
+        <div class="popup-name">${escapeHtml(s.Description)}</div>
+        <div class="popup-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
         <div class="popup-arrivals" id="popup-arr-${s.BusStopCode}"><div class="popup-arr-loading">Loading arrivals…</div></div>
         <div class="popup-actions">
           <button class="btn btn-sm" onclick="goToStop('${s.BusStopCode}')">View Arrivals</button>
-          <button class="icon-btn ${isFav ? 'active' : ''}" onclick="toggleFav('${s.BusStopCode}','${escapeHtml(s.Description)}')" title="Favourite">&#9733;</button>
+          <button class="icon-btn ${isFav ? 'active' : ''}" onclick="toggleFav('${s.BusStopCode}','${jsArg(s.Description)}')" title="Favourite">&#9733;</button>
         </div>
       `);
       marker.on("popupopen", () => loadPopupArrivals(s.BusStopCode));
@@ -2358,7 +2381,7 @@ async function loadPopupArrivals(stopCode) {
         const cls = badgeClass(s.next.min);
         const arr = s.next.arrival ? ` data-arrival="${s.next.arrival}"` : "";
         return `<div class="popup-arr-row">
-          <span class="popup-arr-svc">${s.no}</span>
+          <span class="popup-arr-svc">${escapeHtml(s.no)}</span>
           <span class="arrival-badge ${cls}"${arr}><span class="time-text">${badgeLabel(s.next.min)}</span></span>
         </div>`;
       })
@@ -2764,7 +2787,6 @@ function formatDist(m) {
 async function openSettings() {
   const langSel = document.getElementById("langSelect");
   if (langSel && typeof currentLang !== "undefined") langSel.value = currentLang;
-  document.getElementById("apiKeyInput").value = state.apiKey;
   document.getElementById("refreshInterval").value = state.refreshSec;
   document.getElementById("reminderLead").value = state.reminderLeadMin;
   const soundName = localStorage.getItem('bb_alert_sound_name');
@@ -2786,6 +2808,65 @@ async function openSettings() {
   } else {
     infoEl.textContent = "Not cached yet";
   }
+  refreshServerKeyStatus();
+  refreshTelegramStatus();
+}
+
+// The LTA key is a server env var, so there is nothing to type here any more —
+// but "is it actually configured?" is still worth answering, because every
+// arrival in the app fails silently without it.
+async function refreshServerKeyStatus() {
+  const el = document.getElementById("ltaKeyStatus");
+  if (!el) return;
+  try {
+    const { hasKey } = await fetch("/api/check-key").then((r) => r.json());
+    el.textContent = hasKey
+      ? "✅ LTA DataMall key configured on the server."
+      : "❌ LTA_API_KEY isn't set on the server — arrivals won't load. See SETUP.md.";
+  } catch {
+    el.textContent = "⚠️ Couldn't check the server's LTA key.";
+  }
+}
+
+// ── Telegram account linking ──
+// The bot has no Supabase session — a webhook only carries a chat id — so the
+// two are paired with a short-lived code the user types into the chat once.
+async function refreshTelegramStatus() {
+  const el = document.getElementById("tgStatus");
+  if (!el) return;
+  try {
+    const res = await authFetch("/api/telegram-link");
+    if (!res.ok) throw new Error();
+    const { linked, chats } = await res.json();
+    el.textContent = linked
+      ? `✅ Linked to ${chats} Telegram chat${chats === 1 ? "" : "s"}.`
+      : "Not linked. Get a code, then send it to the bot as /link CODE.";
+    document.getElementById("tgUnlinkBtn").style.display = linked ? "" : "none";
+  } catch {
+    el.textContent = "Couldn't check Telegram link status.";
+  }
+}
+
+async function requestTelegramCode() {
+  const el = document.getElementById("tgStatus");
+  try {
+    const res = await authFetch("/api/telegram-link", { method: "POST", body: "{}" });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.status);
+    const { code, expiresInMin } = await res.json();
+    el.innerHTML = `Send <code>/link ${escapeHtml(code)}</code> to the Bus Buddy bot within ${expiresInMin} minutes.`;
+  } catch (e) {
+    el.textContent = "Couldn't get a link code: " + e.message;
+  }
+}
+
+async function unlinkTelegram() {
+  try {
+    await authFetch("/api/telegram-link", { method: "DELETE" });
+    showToast("Telegram unlinked");
+  } catch {
+    showToast("Couldn't unlink Telegram");
+  }
+  refreshTelegramStatus();
 }
 
 async function refreshBusStopsCache() {
@@ -2826,22 +2907,18 @@ function clearAlertSound() {
 }
 
 async function saveSettings() {
-  state.apiKey = document.getElementById("apiKeyInput").value.trim();
   state.refreshSec =
     parseInt(document.getElementById("refreshInterval").value) || 30;
   state.reminderLeadMin =
     parseInt(document.getElementById("reminderLead").value) || 5;
 
-  localStorage.setItem("bb_apiKey", state.apiKey);
   localStorage.setItem("bb_refreshSec", state.refreshSec.toString());
   localStorage.setItem("bb_reminderLead", state.reminderLeadMin.toString());
 
-  if (state.apiKey) {
-    await setApiKey(state.apiKey);
-    document.getElementById("apiKeyBar").classList.add("hidden");
-    showToast("Settings saved");
-  }
+  syncPrefs();
+  startDashAutoRefresh();
   document.getElementById("settingsModal").classList.add("hidden");
+  showToast("Settings saved");
 }
 
 // ── Audio ──
@@ -2943,6 +3020,9 @@ async function sendNotification(title, body) {
 }
 
 // ── Web Push (background alerts) ──
+// The device id is no longer an identity — it just distinguishes this browser
+// from the other devices on the same account, so one account can hold several
+// push subscriptions.
 function getDeviceId() {
   let id = localStorage.getItem("bb_deviceId");
   if (!id) {
@@ -2987,7 +3067,7 @@ async function initPush() {
       });
     }
     pushSubscription = sub;
-    await syncPushReminders();
+    await registerPushDevice();
     setPushStatus("enabled");
   } catch (e) {
     console.error("Push init failed:", e);
@@ -2995,38 +3075,72 @@ async function initPush() {
   }
 }
 
-// Push the current departure reminders + subscription to the server so the
-// scheduled job can fire them when the app is closed. Also carries favourites
-// and places so they sync across the user's devices.
-async function syncPushReminders() {
+// Registers this browser as one of the account's push targets. Several devices
+// can be registered at once; the cron fans every alert out to all of them.
+async function registerPushDevice() {
+  if (!pushSubscription) return;
   try {
-    await fetch("/api/push", {
+    await authFetch("/api/push", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         deviceId: getDeviceId(),
         subscription: pushSubscription,
-        reminders: state.departureReminders,
-        favourites: state.favourites,
-        places: state.places,
       }),
     });
   } catch (e) {
-    console.error("Reminder sync failed:", e);
+    console.error("Push registration failed:", e);
   }
 }
 
-// Lighter sync for favourites/places changes that don't need a subscription.
-async function syncPrefs() {
+// Called on sign-out: this browser must stop receiving the outgoing account's
+// alerts, even though the push subscription itself survives in the browser.
+async function unregisterPushForDevice() {
+  await authFetch(
+    `/api/push?deviceId=${encodeURIComponent(getDeviceId())}`,
+    { method: "DELETE" }
+  );
+}
+
+// ── Server sync ──
+// Two stores, because they have different owners. The preference blob
+// (favourites, places, settings) is written only by the client, so a single
+// merged document is fine. Reminders live in their own table because the cron
+// writes to them too — keeping them out of the blob is what stops a "last
+// write wins" save from resurrecting a fired reminder's cooldown.
+function remindersToRows() {
+  return state.departureReminders.map((r) => {
+    const { id, ...payload } = r;
+    return { id, type: r.type || "scheduled", payload };
+  });
+}
+
+function rowsToReminders(rows) {
+  return (rows || []).map((row) => ({ ...row.payload, id: row.id, type: row.type }));
+}
+
+let prefsSyncTimer = null;
+
+// Coalesces the bursts of writes that a single user action can produce —
+// toggling a favourite calls this from three different render paths.
+function syncPrefs() {
+  clearTimeout(prefsSyncTimer);
+  prefsSyncTimer = setTimeout(pushPrefsNow, 400);
+}
+
+async function pushPrefsNow() {
   try {
-    await fetch("/api/push", {
+    await authFetch("/api/prefs", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        deviceId: getDeviceId(),
-        favourites: state.favourites,
-        places: state.places,
-        reminders: state.departureReminders,
+        data: {
+          favourites: state.favourites,
+          places: state.places,
+          dropoffAlerts: state.dropoffAlerts,
+          settings: {
+            refreshSec: state.refreshSec,
+            reminderLeadMin: state.reminderLeadMin,
+          },
+        },
       }),
     });
   } catch (e) {
@@ -3034,53 +3148,70 @@ async function syncPrefs() {
   }
 }
 
-// On startup, pull any server-stored prefs for this device and merge them in.
-// Cross-device sync: a device that has never set favourites locally adopts the
-// server copy; otherwise local wins (the user's most recent edits are source).
+async function syncPushReminders() {
+  try {
+    await authFetch("/api/reminders", {
+      method: "POST",
+      body: JSON.stringify({ reminders: remindersToRows() }),
+    });
+  } catch (e) {
+    console.error("Reminder sync failed:", e);
+  }
+}
+
+// On startup, pull this *account's* stored state. Unlike the old
+// device-keyed version, this genuinely restores across devices: sign in on a
+// new phone and your favourites, places and reminders are already there.
+//
+// The server is authoritative on load. Local storage is a cache for offline
+// starts, not a second source of truth — treating it as one is what produced
+// the old "whichever device edited last silently wins" behaviour.
 async function restorePrefs() {
   try {
-    const remote = await fetch(
-      `/api/push?deviceId=${encodeURIComponent(getDeviceId())}`
-    ).then((r) => r.json());
-    if (!remote || typeof remote !== "object") return;
+    const [prefsRes, remRes] = await Promise.all([
+      authFetch("/api/prefs"),
+      authFetch("/api/reminders"),
+    ]);
+    if (!prefsRes.ok || !remRes.ok) return;
 
-    let changed = false;
-    if (
-      state.favourites.length === 0 &&
-      Array.isArray(remote.favourites) &&
-      remote.favourites.length
-    ) {
-      state.favourites = remote.favourites;
-      localStorage.setItem("bb_favourites", JSON.stringify(state.favourites));
-      changed = true;
+    const { data } = await prefsRes.json();
+    const { reminders } = await remRes.json();
+
+    if (data && typeof data === "object") {
+      if (Array.isArray(data.favourites)) {
+        state.favourites = data.favourites;
+        localStorage.setItem(FAV_KEY, JSON.stringify(state.favourites));
+      }
+      if (data.places && typeof data.places === "object") {
+        state.places = sanitizePlaces(data.places);
+        localStorage.setItem("bb_places", JSON.stringify(state.places));
+      }
+      if (Array.isArray(data.dropoffAlerts)) {
+        state.dropoffAlerts = data.dropoffAlerts;
+        localStorage.setItem("bb_dropoffAlerts", JSON.stringify(state.dropoffAlerts));
+      }
+      if (data.settings) {
+        if (data.settings.refreshSec) state.refreshSec = data.settings.refreshSec;
+        if (data.settings.reminderLeadMin)
+          state.reminderLeadMin = data.settings.reminderLeadMin;
+        localStorage.setItem("bb_refreshSec", String(state.refreshSec));
+        localStorage.setItem("bb_reminderLead", String(state.reminderLeadMin));
+      }
     }
-    if (
-      Object.keys(state.places).length === 0 &&
-      remote.places &&
-      Object.keys(remote.places).length
-    ) {
-      state.places = sanitizePlaces(remote.places);
-      localStorage.setItem("bb_places", JSON.stringify(state.places));
-      changed = true;
-    }
-    if (
-      state.departureReminders.length === 0 &&
-      Array.isArray(remote.reminders) &&
-      remote.reminders.length
-    ) {
-      state.departureReminders = remote.reminders;
+
+    if (Array.isArray(reminders)) {
+      state.departureReminders = rowsToReminders(reminders);
       localStorage.setItem(
         "bb_deptReminders",
         JSON.stringify(state.departureReminders)
       );
-      changed = true;
     }
-    if (changed) {
-      renderFavourites();
-      renderDepartureReminders();
-      renderPlaces();
-      refreshDashboard();
-    }
+
+    renderFavourites();
+    renderDepartureReminders();
+    renderDropoffAlerts();
+    renderPlaces();
+    refreshDashboard();
   } catch (e) {
     console.error("Prefs restore failed:", e);
   }
@@ -3107,14 +3238,13 @@ async function testBackgroundAlert() {
   if (!pushSubscription) await initPush();
   showToast("Sending background alert… lock your phone to see it arrive.");
   try {
-    const res = await fetch("/api/test-push", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: getDeviceId() }),
-    });
+    const res = await authFetch("/api/test-push", { method: "POST", body: "{}" });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       showToast("Background test failed: " + (err.error || res.status));
+    } else {
+      const out = await res.json().catch(() => ({}));
+      if (out.devices > 1) showToast(`Sent to ${out.sent} of ${out.devices} devices on this account.`);
     }
   } catch (e) {
     showToast("Background test failed: " + e.message);
@@ -3211,8 +3341,27 @@ async function getStopName(code) {
   }
 }
 
+// This escaped only ' and " — not <, > or & — so it was never HTML-safe; it
+// was really a "make this survive being pasted into an onclick attribute"
+// helper wearing the wrong name. Both jobs are needed, so they're now two
+// functions that each do one of them properly.
 function escapeHtml(str) {
-  return str.replace(/'/g, "\\'").replace(/"/g, "&quot;");
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// For text going into a JS string literal that itself sits inside an HTML
+// attribute — onclick="fn('…')". Two layers of parsing, so two layers of
+// escaping: JS first (a bare quote would end the literal), then HTML. Escaping
+// only one of them is exactly how a stop name with an apostrophe breaks out.
+function jsArg(str) {
+  return escapeHtml(
+    String(str ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'")
+  );
 }
 
 function closeModal(event, id) {

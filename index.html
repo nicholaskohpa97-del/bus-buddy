@@ -916,20 +916,107 @@
 
     .hidden { display: none !important; }
 
-    /* ── API Key Bar ── */
-    .api-key-bar {
-      background: rgba(245,158,11,0.08);
-      border: 1px solid rgba(245,158,11,0.2);
+    /* ── Auth gate ── */
+    /* Covers the whole viewport rather than hiding <main>: the app behind it
+       is never rendered signed-out, so there is nothing to peek at. */
+    .auth-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 4000;
+      background: var(--bg);
+      overflow-y: auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+    body.auth-gate > header,
+    body.auth-gate > main,
+    body.auth-gate > nav { visibility: hidden; }
+    .auth-card {
+      width: 100%;
+      max-width: 380px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px 24px 22px;
+      box-shadow: var(--shadow, 0 8px 30px rgba(0,0,0,0.08));
+    }
+    .auth-logo { font-size: 40px; text-align: center; line-height: 1; }
+    .auth-title { text-align: center; margin: 10px 0 4px; font-size: 22px; }
+    .auth-sub {
+      text-align: center;
+      font-size: 13px;
+      color: var(--text2);
+      margin: 0 0 18px;
+      line-height: 1.5;
+    }
+    .auth-tabs {
+      display: flex;
+      gap: 4px;
+      background: var(--bg2, rgba(0,0,0,0.04));
       border-radius: var(--radius-sm);
-      padding: 14px 16px;
+      padding: 4px;
       margin-bottom: 16px;
+    }
+    .auth-tab {
+      flex: 1;
+      border: 0;
+      background: transparent;
+      padding: 8px 10px;
+      border-radius: calc(var(--radius-sm) - 2px);
+      font: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text2);
+      cursor: pointer;
+    }
+    .auth-tab.active { background: var(--card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    #authForm label { display: block; margin-top: 10px; }
+    .auth-submit { width: 100%; margin-top: 16px; justify-content: center; }
+    .auth-hint { font-size: 12px; color: var(--text2); margin-top: 6px; }
+    .auth-error { font-size: 13px; color: var(--red, #dc2626); margin-top: 10px; }
+    .auth-note { font-size: 13px; color: var(--accent); margin-top: 10px; }
+    .auth-link {
+      display: block;
+      width: 100%;
+      margin-top: 10px;
+      border: 0;
+      background: none;
+      color: var(--accent);
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .auth-divider {
       display: flex;
       align-items: center;
       gap: 10px;
-      font-size: 13px;
-      color: #92400e;
+      margin: 18px 0 12px;
+      color: var(--text2);
+      font-size: 12px;
     }
-    .api-key-bar a { color: var(--accent); text-decoration: underline; }
+    .auth-divider::before,
+    .auth-divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+    .auth-google {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .auth-legal {
+      font-size: 11px;
+      color: var(--text2);
+      text-align: center;
+      margin: 18px 0 0;
+      line-height: 1.5;
+    }
 
     @media (max-width: 380px) {
       .tab { font-size: 10px; }
@@ -1245,7 +1332,9 @@
     }
   </style>
 </head>
-<body>
+<!-- Starts gated: the app is hidden until auth.js confirms a session, so no
+     render path ever runs without a signed-in user. -->
+<body class="auth-gate">
   <div id="splashScreen" class="splash-screen" aria-hidden="true">
     <div class="splash-rail"></div>
     <svg class="splash-bus" width="140" height="91" viewBox="0 0 200 130" xmlns="http://www.w3.org/2000/svg">
@@ -1300,6 +1389,41 @@
       setTimeout(hide, FALLBACK_MS);
     })();
   </script>
+  <!-- AUTH GATE — sits above everything until there's a session. -->
+  <div id="authScreen" class="auth-screen hidden">
+    <div class="auth-card">
+      <div class="auth-logo" aria-hidden="true">🚌</div>
+      <h1 class="auth-title">Bus Buddy</h1>
+      <p class="auth-sub">Sign in to sync your stops, reminders and journeys across every device.</p>
+
+      <div class="auth-tabs" role="tablist">
+        <button id="authTabSignin" class="auth-tab active" role="tab" onclick="authSetMode('signin')">Sign in</button>
+        <button id="authTabSignup" class="auth-tab" role="tab" onclick="authSetMode('signup')">Sign up</button>
+      </div>
+
+      <form id="authForm" onsubmit="authSubmit(event)">
+        <label for="authEmail">Email</label>
+        <input type="email" id="authEmail" autocomplete="email" placeholder="you@example.com" required>
+        <label for="authPassword">Password</label>
+        <input type="password" id="authPassword" autocomplete="current-password" placeholder="Your password" required>
+        <p id="authPasswordHint" class="auth-hint hidden">At least 8 characters, with a letter and a number.</p>
+        <p id="authError" class="auth-error hidden" role="alert"></p>
+        <p id="authNote" class="auth-note hidden" role="status"></p>
+        <button type="submit" id="authSubmit" class="btn auth-submit">Sign in</button>
+        <button type="button" id="authForgot" class="auth-link" onclick="authForgotPassword()">Forgot password?</button>
+
+        <div class="auth-divider"><span>or</span></div>
+
+        <button type="button" class="btn btn-ghost auth-google" onclick="authGoogle()">
+          <svg width="16" height="16" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.9 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.0 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.2-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.0 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.3 0-9.7-3.1-11.3-7.9l-6.5 5C9.6 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4.1 5.6l6.2 5.2C39.9 35.9 44 30.5 44 24c0-1.2-.1-2.4-.4-3.5z"/></svg>
+          Continue with Google
+        </button>
+      </form>
+
+      <p class="auth-legal">Bus timings come from LTA DataMall. Bus Buddy stores only what you save in the app.</p>
+    </div>
+  </div>
+
   <header>
     <div>
       <h1>Bus Buddy</h1>
@@ -1324,12 +1448,6 @@
         <button class="icon-btn" onclick="dismissInstall()" aria-label="Dismiss" style="width:28px;height:28px;font-size:12px;">&#10005;</button>
       </div>
     </div>
-    <div id="apiKeyBar" class="api-key-bar">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-      <span>Set your LTA DataMall API key to get started.</span>
-      <button class="btn btn-sm" onclick="openSettings()">Set Key</button>
-    </div>
-
     <!-- HOME / DASHBOARD TAB -->
     <div id="tab-dashboard">
       <div class="search-bar">
@@ -1508,12 +1626,21 @@
         <option value="ms">Bahasa Melayu</option>
         <option value="ta">தமிழ்</option>
       </select>
-      <label for="apiKeyInput" data-i18n="settings.apiKey">LTA DataMall API Key</label>
-      <input type="text" id="apiKeyInput" placeholder="Enter your API key">
-      <p style="font-size:12px;color:var(--text2);margin-top:6px;">
-        Free key from <span style="color:var(--accent)">datamall.lta.gov.sg</span> &rarr; Request for API Access
-      </p>
-      <label for="refreshInterval" data-i18n="settings.refresh">Auto-refresh interval (seconds)</label>
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">
+        <label>Account</label>
+        <div id="accountEmail" style="font-size:13px;color:var(--text2);margin-top:4px;word-break:break-all;"></div>
+        <button class="btn btn-ghost btn-sm" onclick="authSignOut()" style="margin-top:8px;">Sign out</button>
+      </div>
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">
+        <label>Telegram</label>
+        <p style="font-size:12px;color:var(--text2);margin:4px 0 6px;">Create and list journey modes from a Telegram chat.</p>
+        <div id="tgStatus" style="font-size:13px;color:var(--text2);"></div>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-sm" onclick="requestTelegramCode()">Get link code</button>
+          <button id="tgUnlinkBtn" class="btn btn-ghost btn-sm" onclick="unlinkTelegram()" style="display:none;">Unlink</button>
+        </div>
+      </div>
+      <label for="refreshInterval" data-i18n="settings.refresh" style="margin-top:14px;">Auto-refresh interval (seconds)</label>
       <input type="number" id="refreshInterval" value="30" min="10" max="120">
       <label for="reminderLead" data-i18n="settings.lead">Departure reminder lead time (minutes)</label>
       <input type="number" id="reminderLead" value="5" min="1" max="30">
@@ -1538,6 +1665,7 @@
         <label>Bus Stop Database</label>
         <div style="font-size:13px;color:var(--text2);margin-top:4px;" id="busStopCacheInfo">Checking cache...</div>
         <button class="btn btn-ghost btn-sm" onclick="refreshBusStopsCache()" style="margin-top:8px;">&#8635; Refresh bus stop database</button>
+        <div id="ltaKeyStatus" style="font-size:12px;color:var(--text2);margin-top:10px;"></div>
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="document.getElementById('settingsModal').classList.add('hidden')" data-i18n="settings.cancel">Cancel</button>
@@ -1726,8 +1854,15 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <!-- Supabase's UMD build, loaded from a CDN the same way Leaflet is.
+       Hand-rolling the OAuth redirect dance and silent token refresh is a lot
+       of subtle code to get wrong for no benefit. -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <script src="i18n.js"></script>
   <script src="app.js"></script>
+  <!-- auth.js last: it owns DOMContentLoaded and calls into app.js once a
+       session exists, so app.js must already be parsed. -->
+  <script src="auth.js"></script>
   <script>
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js");
