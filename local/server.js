@@ -19,14 +19,13 @@ const ROOT = path.join(__dirname, "..");
 async function handleAPI(req, res, pathname) {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
-  if (pathname === "/api/check-key") {
-    return json(res, { hasKey: !!LTA_API_KEY });
-  }
-
-  if (pathname === "/api/set-key" && req.method === "POST") {
-    const body = await readBody(req);
-    LTA_API_KEY = body.key || "";
-    return json(res, { ok: true });
+  // Mirrors api/config.js so the auth screen can boot against a local server.
+  // Set SUPABASE_URL and SUPABASE_ANON_KEY to sign in locally.
+  if (pathname === "/api/config") {
+    return json(res, {
+      supabaseUrl: process.env.SUPABASE_URL || "",
+      supabaseAnonKey: process.env.SUPABASE_ANON_KEY || "",
+    });
   }
 
   if (pathname === "/api/bus-arrival") {
@@ -103,14 +102,6 @@ async function fetchPaginated(res, endpoint) {
 function json(res, data, status = 200) {
   res.writeHead(status, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
   res.end(JSON.stringify(data));
-}
-
-function readBody(req) {
-  return new Promise((resolve) => {
-    let d = "";
-    req.on("data", (c) => (d += c));
-    req.on("end", () => { try { resolve(JSON.parse(d)); } catch { resolve({}); } });
-  });
 }
 
 const server = http.createServer(async (req, res) => {

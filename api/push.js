@@ -1,50 +1,68 @@
-const SB_URL = process.env.SUPABASE_URL;
-const SB_KEY = process.env.SUPABASE_ANON_KEY;
+const {
+  sbUrl,
+  fetchWithTimeout,
+  userHeaders,
+  requireUser,
+  applyCors,
+} = require("./_auth");
 
-const BASE_HEADERS = {
-  apikey: SB_KEY,
-  Authorization: `Bearer ${SB_KEY}`,
-  "Content-Type": "application/json",
-};
+// Preferences (favourites, places, reminders) belong to the account and are
+// shared across every device signed into it. Push subscriptions are per-device,
+// so a user with a phone and a laptop gets alerts on both.
+//
+// All queries run as the caller with their own token, so RLS — not this code —
+// is what actually keeps one account out of another's rows.
 
-async function getSub(deviceId) {
-  const res = await fetch(
-    `${SB_URL}/rest/v1/push_subs?device_id=eq.${encodeURIComponent(
-      deviceId
-    )}&select=data`,
-    { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } }
+async function getPrefs(user) {
+  const res = await fetchWithTimeout(
+    `${sbUrl()}/rest/v1/user_prefs?user_id=eq.${user.id}&select=data`,
+    { headers: userHeaders(user.token) }
   );
+  if (!res.ok) return null;
   const rows = await res.json();
   return rows[0]?.data || null;
 }
 
-async function upsertSub(deviceId, data) {
-  await fetch(`${SB_URL}/rest/v1/push_subs`, {
+async function savePrefs(user, data) {
+  const res = await fetchWithTimeout(`${sbUrl()}/rest/v1/user_prefs`, {
     method: "POST",
-    headers: {
-      ...BASE_HEADERS,
+    headers: userHeaders(user.token, {
       Prefer: "resolution=merge-duplicates,return=minimal",
-    },
+    }),
     body: JSON.stringify({
-      device_id: deviceId,
+      user_id: user.id,
       data,
       updated_at: new Date().toISOString(),
     }),
   });
+  if (!res.ok) throw new Error(`Supabase ${res.status}: ${await res.text()}`);
+}
+
+async function saveSubscription(user, deviceId, subscription) {
+  const res = await fetchWithTimeout(`${sbUrl()}/rest/v1/push_subs`, {
+    method: "POST",
+    headers: userHeaders(user.token, {
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    }),
+    body: JSON.stringify({
+      user_id: user.id,
+      device_id: deviceId,
+      subscription,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+  if (!res.ok) throw new Error(`Supabase ${res.status}: ${await res.text()}`);
 }
 
 module.exports = async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (applyCors(req, res)) return;
 
-  if (req.method === "OPTIONS") return res.status(200).end();
+  const user = await requireUser(req, res);
+  if (!user) return;
 
   if (req.method === "GET") {
-    const deviceId = req.query.deviceId;
-    if (!deviceId) return res.status(400).json({ error: "deviceId required" });
     try {
-      return res.json((await getSub(deviceId)) || {});
+      return res.json((await getPrefs(user)) || {});
     } catch {
       return res.json({});
     }
@@ -54,24 +72,24 @@ module.exports = async (req, res) => {
     try {
       const { deviceId, subscription, reminders, favourites, places } =
         req.body || {};
-      if (!deviceId) return res.status(400).json({ error: "deviceId required" });
 
-      const existing = (await getSub(deviceId)) || {};
+      const existing = (await getPrefs(user)) || {};
       const data = {
-        subscription: subscription || existing.subscription || null,
-        reminders: Array.isArray(reminders)
-          ? reminders
-          : existing.reminders || [],
+        reminders: Array.isArray(reminders) ? reminders : existing.reminders || [],
         favourites: Array.isArray(favourites)
           ? favourites
           : existing.favourites || [],
         places:
-          places && typeof places === "object"
-            ? places
-            : existing.places || {},
+          places && typeof places === "object" ? places : existing.places || {},
         notifyState: existing.notifyState || {},
       };
-      await upsertSub(deviceId, data);
+      await savePrefs(user, data);
+
+      // Only sent when the browser has a live push subscription to register.
+      if (deviceId && subscription) {
+        await saveSubscription(user, deviceId, subscription);
+      }
+
       return res.json({ ok: true });
     } catch (e) {
       return res.status(500).json({ error: e.message });

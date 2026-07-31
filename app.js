@@ -16,7 +16,6 @@ function sanitizePlaces(places) {
 
 // ── State ──
 let state = {
-  apiKey: localStorage.getItem("bb_apiKey") || "",
   refreshSec: parseInt(localStorage.getItem("bb_refreshSec") || "30"),
   reminderLeadMin: parseInt(localStorage.getItem("bb_reminderLead") || "5"),
   favourites: JSON.parse(localStorage.getItem("bb_favourites") || "[]"),
@@ -127,16 +126,38 @@ function dismissInstall() {
 }
 
 // ── Init ──
-document.addEventListener("DOMContentLoaded", async () => {
+// Sign-in gates everything. startAuth() (auth.js) resolves the session and calls
+// bootstrapApp() once there is one — either straight away for a returning user,
+// or via onAuthStateChange after a fresh sign-in / OAuth redirect.
+let appBooted = false;
+
+document.addEventListener("DOMContentLoaded", () => {
   initTheme();
-  const keyCheck = await fetch("/api/check-key").then(r => r.json()).catch(() => ({ hasKey: false }));
-  if (keyCheck.hasKey) {
-    document.getElementById("apiKeyBar").classList.add("hidden");
-  } else if (state.apiKey) {
-    await setApiKey(state.apiKey);
-    document.getElementById("apiKeyBar").classList.add("hidden");
-  }
-  document.getElementById("apiKeyInput").value = state.apiKey;
+  document.addEventListener("click", unlockAudio, { once: true });
+  document.addEventListener("touchstart", unlockAudio, { once: true });
+  startAuth();
+});
+
+// Re-read the per-user slices of localStorage. auth.js clears these when a
+// different account signs in on this browser, so state must be rebuilt rather
+// than reused from module load.
+function hydrateUserState() {
+  state.favourites = JSON.parse(localStorage.getItem("bb_favourites") || "[]");
+  state.departureReminders = JSON.parse(
+    localStorage.getItem("bb_deptReminders") || "[]"
+  );
+  state.dropoffAlerts = JSON.parse(
+    localStorage.getItem("bb_dropoffAlerts") || "[]"
+  );
+  state.modes = JSON.parse(localStorage.getItem("bb_modes") || "[]");
+  state.places = sanitizePlaces(JSON.parse(localStorage.getItem("bb_places") || "{}"));
+}
+
+function bootstrapApp() {
+  if (appBooted) return;
+  appBooted = true;
+
+  hydrateUserState();
   document.getElementById("refreshInterval").value = state.refreshSec;
   document.getElementById("reminderLead").value = state.reminderLeadMin;
   document
@@ -158,20 +179,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   startDepartureChecker();
   startArrivalTicker();
   maybeShowOnboarding();
-  document.addEventListener('click', unlockAudio, { once: true });
-  document.addEventListener('touchstart', unlockAudio, { once: true });
   if (window.__hideSplash) window.__hideSplash();
-});
-
-// ── API ──
-async function setApiKey(key) {
-  await fetch("/api/set-key", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key }),
-  });
 }
 
+// ── API ──
 async function fetchArrivals(stopCode, serviceNo) {
   let url = `/api/bus-arrival?BusStopCode=${stopCode}`;
   if (serviceNo) url += `&ServiceNo=${serviceNo}`;
@@ -663,7 +674,7 @@ async function handleSearch(val, scope = "arrivals") {
           html += services
             .map(
               (no) => `
-            <div class="search-result-item search-result-item-service" onclick="selectService('${escapeHtml(no)}','${scope}')">
+            <div class="search-result-item search-result-item-service" onclick="selectService('${escapeJsAttr(no)}','${scope}')">
               <div class="search-result-name">&#128652; Bus ${escapeHtml(no)}</div>
               <div class="search-result-detail">Tap to view route &amp; stops</div>
             </div>`
@@ -1081,7 +1092,7 @@ async function loadArrivals(stopCode) {
               <h3>${stopName}</h3>
               <span class="bus-stop-code">${stopCode}</span>
             </div>
-            <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${escapeHtml(stopName)}')" title="Favourite">&#9733;</button>
+            <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${escapeJsAttr(stopName)}')" title="Favourite">&#9733;</button>
           </div>
           <div class="empty-state"><p>No bus services at this time.</p></div>
         </div>`;
@@ -1097,7 +1108,7 @@ async function loadArrivals(stopCode) {
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <div class="auto-refresh"><div class="dot"></div> Live</div>
-            <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${escapeHtml(stopName)}')" title="Favourite">&#9733;</button>
+            <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${escapeJsAttr(stopName)}')" title="Favourite">&#9733;</button>
           </div>
         </div>
         ${activeServices.length === 0 ? '<div class="empty-state" style="padding:16px 0;"><p>No bus services at this time.</p></div>' : ""}
@@ -1292,7 +1303,7 @@ function renderFavourites() {
         <div class="fav-name">${f.name}</div>
         <div class="fav-detail">${f.code}</div>
       </div>
-      <button class="icon-btn" onclick="event.stopPropagation();toggleFav('${f.code}','${escapeHtml(f.name)}')" title="Remove">&#10005;</button>
+      <button class="icon-btn" onclick="event.stopPropagation();toggleFav('${f.code}','${escapeJsAttr(f.name)}')" title="Remove">&#10005;</button>
     </div>`
     )
     .join("");
@@ -1591,14 +1602,32 @@ function startDepartureChecker() {
   deptCheckTimer = setInterval(checkDepartureReminders, 30000);
 }
 
+// Mirrors COOLDOWN_MS in api/check-reminders.js. Without it the 30s foreground
+// tick would re-notify for the whole 40-minute reminder window.
+const DEPT_COOLDOWN_MS = 60 * 60 * 1000;
+
+function loadDeptNotifyState() {
+  try {
+    return JSON.parse(localStorage.getItem("bb_deptNotifyState") || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function markDeptNotified(id) {
+  const st = loadDeptNotifyState();
+  st[id] = Date.now();
+  localStorage.setItem("bb_deptNotifyState", JSON.stringify(st));
+}
+
 async function checkDepartureReminders() {
-  if (!state.apiKey) return;
   const now = new Date();
   const nowMins = now.getHours() * 60 + now.getMinutes();
+  const notifyState = loadDeptNotifyState();
 
   const todayDow = now.getDay();
   for (const r of state.departureReminders) {
-    if (!r.enabled) continue;
+    if (!r.enabled || !r.time) continue;
     if (Array.isArray(r.days) && r.days.length && !r.days.includes(todayDow))
       continue;
     const [h, m] = r.time.split(":").map(Number);
@@ -1607,6 +1636,7 @@ async function checkDepartureReminders() {
     const windowEnd = targetMins + 10;
 
     if (nowMins < windowStart || nowMins > windowEnd) continue;
+    if (Date.now() - (notifyState[r.id] || 0) < DEPT_COOLDOWN_MS) continue;
 
     try {
       const data = await fetchArrivals(r.stop, r.service);
@@ -1618,6 +1648,7 @@ async function checkDepartureReminders() {
           `Bus ${r.service} arriving in ${next.min} min!`,
           `${r.nickname} - Time to head to stop ${r.stop}`
         );
+        markDeptNotified(r.id);
       }
     } catch (e) { console.error('Reminder check failed:', e); }
   }
@@ -1809,7 +1840,7 @@ function haversine(lat1, lon1, lat2, lon2) {
 async function postModes(modes) {
   localStorage.setItem("bb_modes", JSON.stringify(modes));
   try {
-    await fetch("/api/modes", {
+    await authedFetch("/api/modes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(modes),
@@ -1819,7 +1850,7 @@ async function postModes(modes) {
 
 async function loadModes() {
   try {
-    const remote = await fetch("/api/modes").then(r => r.json());
+    const remote = await authedFetch("/api/modes").then(r => r.json());
     if (Array.isArray(remote)) {
       state.modes = remote;
       localStorage.setItem("bb_modes", JSON.stringify(remote));
@@ -2326,7 +2357,7 @@ async function loadMapStops() {
         <div class="popup-arrivals" id="popup-arr-${s.BusStopCode}"><div class="popup-arr-loading">Loading arrivals…</div></div>
         <div class="popup-actions">
           <button class="btn btn-sm" onclick="goToStop('${s.BusStopCode}')">View Arrivals</button>
-          <button class="icon-btn ${isFav ? 'active' : ''}" onclick="toggleFav('${s.BusStopCode}','${escapeHtml(s.Description)}')" title="Favourite">&#9733;</button>
+          <button class="icon-btn ${isFav ? 'active' : ''}" onclick="toggleFav('${s.BusStopCode}','${escapeJsAttr(s.Description)}')" title="Favourite">&#9733;</button>
         </div>
       `);
       marker.on("popupopen", () => loadPopupArrivals(s.BusStopCode));
@@ -2764,9 +2795,10 @@ function formatDist(m) {
 async function openSettings() {
   const langSel = document.getElementById("langSelect");
   if (langSel && typeof currentLang !== "undefined") langSel.value = currentLang;
-  document.getElementById("apiKeyInput").value = state.apiKey;
   document.getElementById("refreshInterval").value = state.refreshSec;
   document.getElementById("reminderLead").value = state.reminderLeadMin;
+  const emailEl = document.getElementById("accountEmail");
+  if (emailEl) emailEl.textContent = currentUserEmail() || "Signed in";
   const soundName = localStorage.getItem('bb_alert_sound_name');
   document.getElementById("alertSoundName").textContent = soundName || "Default chime";
   document.getElementById("clearSoundBtn").style.display = soundName ? "" : "none";
@@ -2785,6 +2817,20 @@ async function openSettings() {
     infoEl.textContent = `${cached.stops.length} stops cached · last updated ${ageStr}`;
   } else {
     infoEl.textContent = "Not cached yet";
+  }
+}
+
+async function generateTelegramCode() {
+  const el = document.getElementById("telegramCode");
+  el.textContent = "…";
+  try {
+    const res = await authedFetch("/api/tg-link", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.status);
+    el.textContent = `${data.code} (valid 10 min)`;
+  } catch (e) {
+    el.textContent = "";
+    showToast("Could not generate a code: " + e.message);
   }
 }
 
@@ -2826,21 +2872,15 @@ function clearAlertSound() {
 }
 
 async function saveSettings() {
-  state.apiKey = document.getElementById("apiKeyInput").value.trim();
   state.refreshSec =
     parseInt(document.getElementById("refreshInterval").value) || 30;
   state.reminderLeadMin =
     parseInt(document.getElementById("reminderLead").value) || 5;
 
-  localStorage.setItem("bb_apiKey", state.apiKey);
   localStorage.setItem("bb_refreshSec", state.refreshSec.toString());
   localStorage.setItem("bb_reminderLead", state.reminderLeadMin.toString());
 
-  if (state.apiKey) {
-    await setApiKey(state.apiKey);
-    document.getElementById("apiKeyBar").classList.add("hidden");
-    showToast("Settings saved");
-  }
+  showToast("Settings saved");
   document.getElementById("settingsModal").classList.add("hidden");
 }
 
@@ -3000,7 +3040,7 @@ async function initPush() {
 // and places so they sync across the user's devices.
 async function syncPushReminders() {
   try {
-    await fetch("/api/push", {
+    await authedFetch("/api/push", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3019,11 +3059,10 @@ async function syncPushReminders() {
 // Lighter sync for favourites/places changes that don't need a subscription.
 async function syncPrefs() {
   try {
-    await fetch("/api/push", {
+    await authedFetch("/api/push", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        deviceId: getDeviceId(),
         favourites: state.favourites,
         places: state.places,
         reminders: state.departureReminders,
@@ -3034,14 +3073,13 @@ async function syncPrefs() {
   }
 }
 
-// On startup, pull any server-stored prefs for this device and merge them in.
-// Cross-device sync: a device that has never set favourites locally adopts the
-// server copy; otherwise local wins (the user's most recent edits are source).
+// On startup, pull this account's server-stored prefs and merge them in. Now
+// that prefs are keyed on the signed-in user rather than a random device id,
+// this is real cross-device sync: a device with nothing saved locally adopts
+// the account copy, otherwise local wins (most recent edits are the source).
 async function restorePrefs() {
   try {
-    const remote = await fetch(
-      `/api/push?deviceId=${encodeURIComponent(getDeviceId())}`
-    ).then((r) => r.json());
+    const remote = await authedFetch("/api/push").then((r) => r.json());
     if (!remote || typeof remote !== "object") return;
 
     let changed = false;
@@ -3107,7 +3145,7 @@ async function testBackgroundAlert() {
   if (!pushSubscription) await initPush();
   showToast("Sending background alert… lock your phone to see it arrive.");
   try {
-    const res = await fetch("/api/test-push", {
+    const res = await authedFetch("/api/test-push", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ deviceId: getDeviceId() }),
@@ -3211,8 +3249,30 @@ async function getStopName(code) {
   }
 }
 
+// Escape for HTML text content and for quoted attribute values.
 function escapeHtml(str) {
-  return str.replace(/'/g, "\\'").replace(/"/g, "&quot;");
+  return String(str == null ? "" : str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Escape for a value that lands inside a single-quoted JS string literal which
+// itself sits inside a double-quoted HTML attribute:
+//   onclick="toggleFav('123','<value>')"
+// The backslash escaping has to survive HTML entity decoding, so an apostrophe
+// stays a literal \' rather than becoming &#39; — which the parser would decode
+// back into a bare quote and break out of the JS string.
+function escapeJsAttr(str) {
+  return String(str == null ? "" : str)
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function closeModal(event, id) {

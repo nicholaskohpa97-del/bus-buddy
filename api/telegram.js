@@ -1,13 +1,11 @@
+const { sbUrl, serviceHeaders, fetchWithTimeout } = require("./_auth");
+
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TG_API = `https://api.telegram.org/bot${TOKEN}`;
-const SB_URL = process.env.SUPABASE_URL;
-const SB_KEY = process.env.SUPABASE_ANON_KEY;
-const SB_HEADERS = {
-  apikey: SB_KEY,
-  Authorization: `Bearer ${SB_KEY}`,
-  "Content-Type": "application/json",
-  Prefer: "return=minimal",
-};
+
+// The bot is a server-to-server webhook — there is no user JWT in the request,
+// so it runs with the service key and scopes every query by the user_id that
+// this chat has been linked to. An unlinked chat can't touch anyone's data.
 
 async function sendMessage(chatId, text) {
   await fetch(`${TG_API}/sendMessage`, {
@@ -17,26 +15,70 @@ async function sendMessage(chatId, text) {
   });
 }
 
-async function getModes() {
-  const res = await fetch(`${SB_URL}/rest/v1/modes?id=eq.1&select=data`, {
-    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
+// ── Account linking ──
+
+async function getLinkedUser(chatId) {
+  const res = await fetchWithTimeout(
+    `${sbUrl()}/rest/v1/tg_links?chat_id=eq.${chatId}&select=user_id`,
+    { headers: serviceHeaders() }
+  );
+  if (!res.ok) return null;
+  const rows = await res.json();
+  return rows[0]?.user_id || null;
+}
+
+// Consume a one-time code generated in the app (Settings → Connect Telegram).
+async function redeemLinkCode(chatId, code) {
+  const res = await fetchWithTimeout(
+    `${sbUrl()}/rest/v1/tg_link_codes?code=eq.${encodeURIComponent(
+      code
+    )}&select=user_id,expires_at`,
+    { headers: serviceHeaders() }
+  );
+  if (!res.ok) return null;
+  const rows = await res.json();
+  const row = rows[0];
+  if (!row) return null;
+  if (new Date(row.expires_at).getTime() < Date.now()) return null;
+
+  await fetchWithTimeout(`${sbUrl()}/rest/v1/tg_links`, {
+    method: "POST",
+    headers: serviceHeaders({ Prefer: "resolution=merge-duplicates,return=minimal" }),
+    body: JSON.stringify({ chat_id: String(chatId), user_id: row.user_id }),
   });
+  await fetchWithTimeout(
+    `${sbUrl()}/rest/v1/tg_link_codes?code=eq.${encodeURIComponent(code)}`,
+    { method: "DELETE", headers: serviceHeaders() }
+  );
+  return row.user_id;
+}
+
+async function getModes(userId) {
+  const res = await fetchWithTimeout(
+    `${sbUrl()}/rest/v1/modes?user_id=eq.${userId}&select=data`,
+    { headers: serviceHeaders() }
+  );
+  if (!res.ok) return [];
   const rows = await res.json();
   return rows[0]?.data || [];
 }
 
-async function setModes(modes) {
-  await fetch(`${SB_URL}/rest/v1/modes?id=eq.1`, {
-    method: "PATCH",
-    headers: SB_HEADERS,
-    body: JSON.stringify({ data: modes }),
+async function setModes(userId, modes) {
+  await fetchWithTimeout(`${sbUrl()}/rest/v1/modes`, {
+    method: "POST",
+    headers: serviceHeaders({ Prefer: "resolution=merge-duplicates,return=minimal" }),
+    body: JSON.stringify({
+      user_id: userId,
+      data: modes,
+      updated_at: new Date().toISOString(),
+    }),
   });
 }
 
 async function getSession(chatId) {
-  const res = await fetch(
-    `${SB_URL}/rest/v1/tg_sessions?chat_id=eq.${chatId}&select=data,updated_at`,
-    { headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` } }
+  const res = await fetchWithTimeout(
+    `${sbUrl()}/rest/v1/tg_sessions?chat_id=eq.${chatId}&select=data,updated_at`,
+    { headers: serviceHeaders() }
   );
   const rows = await res.json();
   if (!rows[0]) return null;
@@ -50,17 +92,17 @@ async function getSession(chatId) {
 }
 
 async function setSession(chatId, data) {
-  await fetch(`${SB_URL}/rest/v1/tg_sessions`, {
+  await fetchWithTimeout(`${sbUrl()}/rest/v1/tg_sessions`, {
     method: "POST",
-    headers: { ...SB_HEADERS, Prefer: "resolution=merge-duplicates" },
+    headers: serviceHeaders({ Prefer: "resolution=merge-duplicates,return=minimal" }),
     body: JSON.stringify({ chat_id: chatId, data, updated_at: new Date().toISOString() }),
   });
 }
 
 async function delSession(chatId) {
-  await fetch(`${SB_URL}/rest/v1/tg_sessions?chat_id=eq.${chatId}`, {
+  await fetchWithTimeout(`${sbUrl()}/rest/v1/tg_sessions?chat_id=eq.${chatId}`, {
     method: "DELETE",
-    headers: { apikey: SB_KEY, Authorization: `Bearer ${SB_KEY}` },
+    headers: serviceHeaders(),
   });
 }
 
@@ -102,6 +144,7 @@ module.exports = async (req, res) => {
     await sendMessage(chatId,
       "<b>Bus Buddy Bot 🚌</b>\n\n" +
       "Commands:\n" +
+      "/link &lt;code&gt; – Connect your Bus Buddy account\n" +
       "/newmode – Create a journey mode\n" +
       "/modes – List saved modes\n" +
       "/deletemode &lt;number&gt; – Delete a mode\n" +
@@ -110,8 +153,30 @@ module.exports = async (req, res) => {
     return res.status(200).end();
   }
 
+  const linkMatch = text.match(/^\/link\s+([A-Za-z0-9]{4,12})$/);
+  if (linkMatch) {
+    const userId = await redeemLinkCode(chatId, linkMatch[1].toUpperCase());
+    if (userId) {
+      await sendMessage(chatId, "✅ Connected to your Bus Buddy account. Try /modes.");
+    } else {
+      await sendMessage(chatId, "That code is invalid or has expired. Generate a new one in Bus Buddy → Settings → Connect Telegram.");
+    }
+    return res.status(200).end();
+  }
+
+  // Everything past this point reads or writes a specific account's data.
+  const linkedUser = await getLinkedUser(chatId);
+  if (!linkedUser) {
+    await sendMessage(chatId,
+      "🔒 This chat isn't connected to a Bus Buddy account yet.\n\n" +
+      "Open Bus Buddy → Settings → <b>Connect Telegram</b> to get a code, then send:\n" +
+      "<code>/link YOURCODE</code>"
+    );
+    return res.status(200).end();
+  }
+
   if (text === "/modes") {
-    const modes = await getModes();
+    const modes = await getModes(linkedUser);
     if (modes.length === 0) {
       await sendMessage(chatId, "No journey modes saved yet. Use /newmode to create one.");
     } else {
@@ -130,12 +195,12 @@ module.exports = async (req, res) => {
   const deleteMatch = text.match(/^\/deletemode\s+(\d+)$/);
   if (deleteMatch) {
     const idx = parseInt(deleteMatch[1]) - 1;
-    const modes = await getModes();
+    const modes = await getModes(linkedUser);
     if (idx < 0 || idx >= modes.length) {
       await sendMessage(chatId, `Invalid number. You have ${modes.length} mode(s). Use /modes to see the list.`);
     } else {
       const deleted = modes.splice(idx, 1)[0];
-      await setModes(modes);
+      await setModes(linkedUser, modes);
       await sendMessage(chatId, `✅ Deleted mode "<b>${deleted.name}</b>".`);
     }
     await delSession(chatId);
@@ -208,9 +273,9 @@ module.exports = async (req, res) => {
       active: false,
       createdVia: "telegram",
     };
-    const modes = await getModes();
+    const modes = await getModes(linkedUser);
     modes.push(mode);
-    await setModes(modes);
+    await setModes(linkedUser, modes);
     await sendMessage(chatId,
       `✅ Mode "<b>${mode.name}</b>" saved!\n\n` +
       `🚌 Bus ${mode.service} from stop ${mode.departureStop}\n` +
