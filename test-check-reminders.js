@@ -29,7 +29,7 @@ const SGT_OFFSET = 8 * 3600 * 1000;
 // answer both reads. `subRows` defaults to a single device owned by USER_A, so
 // existing tests that only care about reminder logic don't have to spell it
 // out.
-function makeMockFetch({ reminderRows = [], subRows = null, supabaseSaveOk = true, ltaMinutes = 3, ltaTimes = null, ltaError = false, ltaStatus = 200 } = {}) {
+function makeMockFetch({ reminderRows = [], subRows = null, rideRows = [], vehicle = null, supabaseSaveOk = true, ltaMinutes = 3, ltaTimes = null, ltaError = false, ltaStatus = 200 } = {}) {
   const subs = subRows === null ? [makeSub()] : subRows;
   return async function mockFetch(url, opts = {}) {
     const urlStr = url.toString();
@@ -38,6 +38,13 @@ function makeMockFetch({ reminderRows = [], subRows = null, supabaseSaveOk = tru
     }
     if (urlStr.includes("/rest/v1/push_subs?select=")) {
       return { ok: true, json: async () => subs, text: async () => JSON.stringify(subs) };
+    }
+    if (urlStr.includes("/rest/v1/rides?select=")) {
+      return { ok: true, json: async () => rideRows, text: async () => JSON.stringify(rideRows) };
+    }
+    if (urlStr.includes("/rest/v1/rides") && opts.method === "DELETE") {
+      endedRides.push(urlStr);
+      return { ok: true, status: 200, text: async () => "" };
     }
     if (urlStr.includes("/rest/v1/reminders") && opts.method === "PATCH") {
       if (!supabaseSaveOk) return { ok: false, status: 500, text: async () => "Internal Server Error" };
@@ -50,6 +57,21 @@ function makeMockFetch({ reminderRows = [], subRows = null, supabaseSaveOk = tru
     if (urlStr.includes("/rest/v1/reminders") && opts.method === "DELETE") {
       deletedReminders.push(urlStr);
       return { ok: true, status: 200, text: async () => "" };
+    }
+    if (urlStr.includes("BusArrival") && vehicle && urlStr.includes(`BusStopCode=${vehicle.forStop}`)) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          Services: [{
+            NextBus: {
+              Latitude: String(vehicle.lat),
+              Longitude: String(vehicle.lng),
+              EstimatedArrival: new Date(Date.now() + vehicle.etaMin * 60000).toISOString(),
+            },
+          }],
+        }),
+      };
     }
     if (urlStr.includes("BusArrival")) {
       if (ltaError) throw new Error("LTA network error");
@@ -71,6 +93,7 @@ function makeMockFetch({ reminderRows = [], subRows = null, supabaseSaveOk = tru
 }
 
 let deletedReminders = [];
+let endedRides = [];
 let patchedReminders = [];
 let pushCallCount = 0;
 let lastPushPayload = null;
@@ -151,7 +174,12 @@ function makeSub(overrides = {}) {
 
 const HANDLER_PATH = path.join(__dirname, "api/check-reminders.js");
 
+const TRACK_RIDES_PATH = path.join(__dirname, "api/track-rides.js");
+
 function loadHandler() {
+  // track-rides is required *by* check-reminders, so it has to be evicted too
+  // or it keeps the env vars from whichever test loaded it first.
+  delete require.cache[require.resolve(TRACK_RIDES_PATH)];
   delete require.cache[require.resolve(HANDLER_PATH)];
   return require(HANDLER_PATH);
 }
@@ -166,6 +194,7 @@ function resetEnv() {
   process.env.VAPID_SUBJECT = "mailto:test@example.com";
   process.env.CRON_SECRET = SECRET;
   deletedReminders = [];
+  endedRides = [];
   patchedReminders = [];
   pushCallCount = 0;
   lastPushPayload = null;
@@ -689,7 +718,137 @@ async function main() {
     assert.strictEqual(lastPushPayload.dismissToken, "tok-abc");
   });
 
-  // ── 10. Response shape ─────────────────────────────────────────────────
+  // ── 10. Ride tracking (server-side drop-off) ───────────────────────────
+
+  console.log("\nRide tracking");
+
+  // Two real Singapore stops ~350 m apart, so "near" and "not near" are
+  // meaningful distances rather than made-up ones.
+  const PREV = { lat: 1.3300, lng: 103.8500 };
+  const DEST = { lat: 1.3330, lng: 103.8520 };
+
+  function makeRide(overrides = {}) {
+    return {
+      id: "ride-1",
+      user_id: USER_A,
+      created_at: new Date().toISOString(),
+      data: {
+        service: "165",
+        destStop: "44009",
+        destName: "Opp Blk 123",
+        prevStop: "44001",
+        prevName: "Blk 100",
+        prevLat: PREV.lat,
+        prevLng: PREV.lng,
+        startedAt: new Date().toISOString(),
+        ...overrides,
+      },
+    };
+  }
+
+  await test("bus near the previous stop → alert, ride ended", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      rideRows: [makeRide()],
+      vehicle: { forStop: "44009", lat: PREV.lat, lng: PREV.lng, etaMin: 5 },
+    });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 1);
+    assert.ok(lastPushPayload.title.includes("Opp Blk 123"), `Got: ${lastPushPayload.title}`);
+    assert.ok(endedRides.some((u) => u.includes("id=eq.ride-1")), "expected the ride to end after alerting");
+  });
+
+  await test("bus still far from the previous stop → no alert", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      rideRows: [makeRide()],
+      vehicle: { forStop: "44009", lat: 1.3100, lng: 103.8200, etaMin: 12 },
+    });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 0);
+    assert.strictEqual(endedRides.length, 0);
+  });
+
+  // The second trigger: LTA sometimes has no vehicle fix, but a low ETA at the
+  // destination still means the bus is on its last leg.
+  await test("no vehicle fix but ETA under 2 min → alert anyway", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      rideRows: [makeRide()],
+      vehicle: { forStop: "44009", lat: 0, lng: 0, etaMin: 1 },
+    });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 1);
+  });
+
+  await test("no vehicle fix and a distant ETA → no alert", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      rideRows: [makeRide()],
+      vehicle: { forStop: "44009", lat: 0, lng: 0, etaMin: 14 },
+    });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 0);
+  });
+
+  await test("ride older than 3 hours is abandoned without alerting", async () => {
+    resetEnv();
+    const stale = makeRide({ startedAt: new Date(Date.now() - 4 * 3600 * 1000).toISOString() });
+    global.fetch = makeMockFetch({
+      rideRows: [stale],
+      vehicle: { forStop: "44009", lat: PREV.lat, lng: PREV.lng, etaMin: 1 },
+    });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 0, "an abandoned ride should not push");
+    assert.ok(endedRides.some((u) => u.includes("id=eq.ride-1")));
+  });
+
+  await test("a ride belonging to an account with no device is skipped", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      rideRows: [makeRide()],
+      subRows: [makeSub({ user_id: USER_B })],
+      vehicle: { forStop: "44009", lat: PREV.lat, lng: PREV.lng, etaMin: 1 },
+    });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 0);
+  });
+
+  await test("ride alert fans out to every device on the account", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      rideRows: [makeRide()],
+      subRows: [makeSub({ id: "s1", device_id: "phone" }), makeSub({ id: "s2", device_id: "watch" })],
+      vehicle: { forStop: "44009", lat: PREV.lat, lng: PREV.lng, etaMin: 3 },
+    });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    assert.strictEqual(pushCallCount, 2);
+  });
+
+  await test("check-reminders reports ride tracking in its response", async () => {
+    resetEnv();
+    global.fetch = makeMockFetch({
+      rideRows: [makeRide()],
+      vehicle: { forStop: "44009", lat: PREV.lat, lng: PREV.lng, etaMin: 3 },
+    });
+    const { req, res } = makeReqRes();
+    await loadHandler()(req, res);
+    const { body } = res._get();
+    assert.ok(body.rides, "expected a rides summary");
+    assert.strictEqual(body.rides.tracked, 1);
+    assert.strictEqual(body.rides.sent, 1);
+    assert.strictEqual(body.rides.ended, 1);
+    assert.deepStrictEqual(body.errors, [], `Unexpected errors: ${JSON.stringify(body.errors)}`);
+  });
+
+  // ── 11. Response shape ─────────────────────────────────────────────────
 
   console.log("\nResponse shape");
 

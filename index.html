@@ -447,6 +447,87 @@
     }
     .dash-stop-services { font-size: 12px; color: var(--accent); font-weight: 600; }
 
+    /* ── Journey planner ── */
+    .modal-tall { max-height: 86vh; overflow-y: auto; }
+    .mode-repeat-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      font-weight: 600;
+    }
+    .mode-repeat-toggle input { width: auto; margin: 0; }
+    .planner-summary {
+      font-size: 13px;
+      color: var(--text2);
+      margin: 14px 0 6px;
+      line-height: 1.5;
+    }
+    .itinerary-card {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+      margin-top: 10px;
+      font: inherit;
+      color: var(--text);
+      cursor: pointer;
+    }
+    .itinerary-card:hover { border-color: rgba(13,148,136,0.4); }
+    .itinerary-top {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .itinerary-duration { font-size: 17px; font-weight: 700; }
+    .itinerary-fare { font-size: 13px; color: var(--accent); font-weight: 600; }
+    .itinerary-legs {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 4px;
+      margin: 8px 0 6px;
+    }
+    .leg-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .leg-bus { border-color: rgba(13,148,136,0.4); color: var(--accent); }
+    .leg-subway, .leg-rail { border-color: rgba(99,102,241,0.4); color: #6366f1; }
+    .leg-arrow { color: var(--text2); font-size: 12px; }
+    .itinerary-meta { font-size: 12px; color: var(--text2); }
+    .leg-row {
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+      margin-top: 12px;
+    }
+    .leg-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .leg-name { font-size: 13px; color: var(--text2); }
+    .leg-row-note { font-size: 12px; color: var(--text2); margin-top: 4px; }
+    .planner-eta {
+      margin-top: 14px;
+      padding: 10px 12px;
+      border-radius: var(--radius-sm);
+      background: rgba(13,148,136,0.08);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .planner-credit { font-size: 11px; color: var(--text2); margin-top: 14px; }
+    .oneshot-eta { color: var(--text2); font-size: 13px; }
+
     /* ── Recent searches ── */
     .recent-header {
       display: flex;
@@ -1556,6 +1637,24 @@
       </div>
       <div class="dash-section">
         <div class="dash-section-header">
+          <h3>Journey Modes</h3>
+          <button class="btn btn-ghost btn-sm" onclick="openPlanner()">Plan a trip</button>
+        </div>
+        <div id="dashModes"></div>
+        <div id="dashModesEmpty" class="empty-state hidden">
+          <div class="icon">&#129517;</div>
+          <p>No journey modes yet.<br><a href="#" onclick="openPlanner();return false" style="color:var(--accent)">Plan a trip</a> or <a href="#" onclick="switchTab('reminders');return false" style="color:var(--accent)">save a mode</a>.</p>
+        </div>
+      </div>
+      <div class="dash-section hidden" id="dashRidesSection">
+        <div class="dash-section-header">
+          <h3>In Progress</h3>
+          <button class="btn btn-ghost btn-sm" onclick="switchTab('reminders')" data-i18n="common.manage">Manage</button>
+        </div>
+        <div id="dashRides"></div>
+      </div>
+      <div class="dash-section">
+        <div class="dash-section-header">
           <h3 data-i18n="dash.departureReminders">Departure Reminders</h3>
           <button class="btn btn-ghost btn-sm" onclick="switchTab('reminders')" data-i18n="common.manage">Manage</button>
         </div>
@@ -1630,10 +1729,16 @@
         <h3 data-i18n="reminders.journeyModes">Journey Modes</h3>
         <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">One tap to arm your departure reminder and drop-off alert together.</p>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <button class="btn" onclick="openModeModal()" data-i18n="reminders.addMode">+ Add Journey Mode</button>
+          <button class="btn" onclick="openPlanner()">&#129517; Plan a trip</button>
+          <button class="btn btn-ghost" onclick="openModeModal()" data-i18n="reminders.addMode">+ Add Journey Mode</button>
           <button class="btn btn-ghost btn-sm" onclick="sendNotification('Test Alert','Audio and notifications are working!')" data-i18n="reminders.testAlert">&#128276; Test Alert</button>
         </div>
         <div id="modesContainer" style="margin-top:12px;"></div>
+      </div>
+      <div class="card" style="margin-top:12px;">
+        <h3>Rides In Progress</h3>
+        <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">Bus Buddy follows the <em>bus</em>, not your phone &mdash; using the vehicle position LTA publishes. The alert arrives one stop early with the app closed and the screen locked.</p>
+        <div id="rideList"></div>
       </div>
       <div class="card" style="margin-top:12px;">
         <h3>Tracking Now</h3>
@@ -1648,7 +1753,7 @@
       </div>
       <div class="card" style="margin-top:12px;">
         <h3>Drop-off Alerts</h3>
-        <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">Get alerted when you're approaching your destination stop. This uses live GPS, so keep the app open during your ride &mdash; tracking stays awake while it's running.</p>
+        <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">A destination-only alert, with no bus attached. It geofences your phone's GPS, so the app has to stay open. For an alert that works with the app closed, start a ride from a bus route instead &mdash; that one tracks the vehicle.</p>
         <button class="btn" onclick="openDropoffModal()" data-i18n="reminders.addDropoff">+ Add Drop-off Alert</button>
         <div id="dropoffReminders" style="margin-top:12px;"></div>
       </div>
@@ -1785,18 +1890,60 @@
       <input type="text" id="modeDeptStop" placeholder="Search stop name or code" data-stop-autocomplete autocomplete="off">
       <label for="modeDeptService">Bus Service Number</label>
       <input type="text" id="modeDeptService" placeholder="e.g. 14">
-      <label for="modeLeaveTime">Leave by</label>
-      <input type="time" id="modeLeaveTime" value="08:00">
-      <label for="modeLeadMin">Alert when bus is within (minutes)</label>
-      <input type="number" id="modeLeadMin" value="5" min="1" max="30">
       <p class="modal-section-divider">Drop-off</p>
       <label for="modeDropoffStop">Destination Stop Code</label>
       <input type="text" id="modeDropoffStop" placeholder="Search stop name or code" data-stop-autocomplete autocomplete="off">
-      <label for="modeDropoffRadius">Alert radius (meters)</label>
-      <input type="number" id="modeDropoffRadius" value="300" min="100" max="1000" step="50">
+      <p style="font-size:12px;color:var(--text2);margin-top:6px;">You'll be alerted at the stop <em>before</em> this one, tracked on the server &mdash; so it still arrives with the app closed.</p>
+      <p class="modal-section-divider">Schedule</p>
+      <label class="mode-repeat-toggle">
+        <input type="checkbox" id="modeRepeatOn" onchange="toggleModeRepeat()">
+        <span>Repeat on a schedule</span>
+      </label>
+      <p style="font-size:12px;color:var(--text2);margin-top:4px;">Leave this off for a mode you start by hand when you're actually travelling.</p>
+      <div id="modeRepeatFields" class="hidden">
+        <label for="modeRepeatTime">Leave by</label>
+        <input type="time" id="modeRepeatTime" value="08:00">
+        <label id="modeRepeatDaysLabel">Repeat on</label>
+        <div id="modeRepeatDays" class="day-picker" role="group" aria-labelledby="modeRepeatDaysLabel"></div>
+        <p style="font-size:11px;color:var(--text2);margin-top:4px;">Leave none selected to alert every day.</p>
+      </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="document.getElementById('modeModal').classList.add('hidden')">Cancel</button>
         <button class="btn" onclick="saveMode()">Save Mode</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- JOURNEY PLANNER -->
+  <div id="plannerModal" class="modal-overlay hidden" onclick="closeModal(event, 'plannerModal')" role="dialog" aria-modal="true" aria-labelledby="plannerTitle">
+    <div class="modal modal-tall" onclick="event.stopPropagation()">
+      <h3 id="plannerTitle">Plan a trip</h3>
+
+      <div id="plannerResultsView">
+        <label for="plannerFrom">From</label>
+        <input type="text" id="plannerFrom" placeholder="Address or postal code" data-address-autocomplete autocomplete="off">
+        <label for="plannerTo">To</label>
+        <input type="text" id="plannerTo" placeholder="Address or postal code" data-address-autocomplete autocomplete="off">
+        <div class="modal-actions" style="margin-top:14px;">
+          <button class="btn btn-ghost" onclick="closePlanner()">Close</button>
+          <button class="btn" onclick="planJourney()">Find routes</button>
+        </div>
+        <div id="plannerSummary" class="planner-summary hidden">
+          <span id="plannerFromLabel"></span> &rarr; <span id="plannerToLabel"></span>
+        </div>
+        <div id="plannerResults"></div>
+        <p class="planner-credit">Routes and fares from <strong>OneMap</strong>, Singapore Land Authority.</p>
+      </div>
+
+      <div id="plannerConfirmView" class="hidden">
+        <div class="route-stops-head">
+          <button class="btn btn-ghost btn-sm" onclick="backToItineraries()" aria-label="Back to routes">&#8592; Routes</button>
+        </div>
+        <div id="plannerConfirmBody"></div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" onclick="closePlanner()">Close</button>
+          <button class="btn" onclick="startPlannedJourney()">Start journey</button>
+        </div>
       </div>
     </div>
   </div>
@@ -1954,6 +2101,7 @@
   <script src="app.js"></script>
   <!-- auth.js last: it owns DOMContentLoaded and calls into app.js once a
        session exists, so app.js must already be parsed. -->
+  <script src="journey.js"></script>
   <script src="auth.js"></script>
   <script>
     if ("serviceWorker" in navigator) {

@@ -47,8 +47,17 @@ Vercel → Project → Settings → Environment Variables.
 | `VAPID_PRIVATE_KEY`         | private key from step 2                                          |
 | `VAPID_SUBJECT`             | `mailto:you@example.com`                                         |
 | `CRON_SECRET`               | a long random string (protects the check endpoint)               |
+| `ONEMAP_EMAIL`              | OneMap account email — journey planning and fares                 |
+| `ONEMAP_PASSWORD`           | OneMap account password                                          |
 | `TELEGRAM_BOT_TOKEN`        | optional — only if you use the Telegram bot                      |
 | `TELEGRAM_WEBHOOK_SECRET`   | optional but strongly recommended alongside the bot (see §6)     |
+
+`ONEMAP_EMAIL` / `ONEMAP_PASSWORD` come from a free account at
+[onemap.gov.sg](https://www.onemap.gov.sg/apidocs/register). They're needed for
+the journey planner: OneMap's geocoder is public, but its routing service is
+not. Google Directions was the alternative and can't do this job — it returns
+no Singapore fare data at all, and its terms require results to be shown on a
+Google map, which conflicts with this app's Leaflet/OpenStreetMap stack.
 
 `SUPABASE_SERVICE_ROLE_KEY` is new and **required**. Once row-level security is
 on, the anon key can only ever see the calling user's own rows — which is the
@@ -108,6 +117,29 @@ create table if not exists modes (
 );
 create index if not exists modes_user_idx on modes (user_id);
 
+-- ── Active rides: the server-tracked half of a drop-off alert ────────────
+-- The cron follows the *bus* (LTA publishes NextBus.Latitude/Longitude) and
+-- pushes when it reaches the stop before yours. A PWA can't watch the phone
+-- in the background — navigator.geolocation doesn't exist in a service
+-- worker and Chrome cancelled the Geofencing API — so the vehicle is the
+-- only thing that can be tracked with the app closed.
+create table if not exists rides (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references auth.users(id) on delete cascade,
+  data       jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+create index if not exists rides_user_idx on rides (user_id);
+
+-- ── Server-side key/value (OneMap access token) ──────────────────────────
+-- The token lasts three days. Serverless functions cold-start constantly, so
+-- an in-memory cache would be empty most of the time; this row survives.
+create table if not exists kv (
+  key        text primary key,
+  value      jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
 -- ── Telegram pairing ─────────────────────────────────────────────────────
 -- A webhook carries a chat id and nothing else, so the bot can't know which
 -- account is typing. The app mints a short-lived code the user sends to the
@@ -134,6 +166,8 @@ alter table user_prefs    enable row level security;
 alter table push_subs     enable row level security;
 alter table reminders     enable row level security;
 alter table modes         enable row level security;
+alter table rides         enable row level security;
+alter table kv            enable row level security;
 alter table tg_links      enable row level security;
 alter table tg_link_codes enable row level security;
 alter table tg_sessions   enable row level security;
@@ -146,10 +180,12 @@ create policy "own reminders" on reminders  for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy "own modes"     on modes      for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "own rides"     on rides      for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy "own tg links"  on tg_links   for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
--- tg_link_codes and tg_sessions get no policy at all: RLS with zero policies
+-- kv, tg_link_codes and tg_sessions get no policy at all: RLS with zero policies
 -- denies everything to anon/authenticated, and only the service key (which
 -- bypasses RLS) touches them. That's deliberate — a link code must be
 -- redeemable by the bot, which has no session.
@@ -218,7 +254,17 @@ Then in the app: **Settings → Telegram → Get link code**, and send
    button should stop it early. `POST /api/dismiss-reminder` is authorised by
    a per-reminder token carried in the push payload, not a session — the
    service worker has no access token.
-6. **Config health** — `GET /api/check-reminders?probe=1` with
+6. **Journey planning** — plan a real trip and check the duration and fare.
+   The fare is an **adult card fare**; concession and cash fares differ and
+   OneMap returns one figure, so the UI labels it rather than implying it
+   applies to everyone. `GET /api/onemap-token` reports whether a token can be
+   obtained (it never returns the token itself).
+7. **Drop-off, the critical test** — open a bus route, tap 📍 **Set as my
+   stop** on a stop a few ahead of you, then *fully close the app and lock the
+   phone*. The "your stop is next" push should still arrive one stop early.
+   This is the whole point of tracking the bus rather than the handset, so if
+   it only works with the app open, something is wrong.
+8. **Config health** — `GET /api/check-reminders?probe=1` with
    `Authorization: Bearer $CRON_SECRET` reports env-var and DB health without
    sending anything.
 
@@ -228,7 +274,9 @@ Then in the app: **Settings → Telegram → Get link code**, and send
 node local/server.js   # http://localhost:3456
 ```
 
-`local/server.js` only implements `check-key`, `bus-arrival`, `bus-stops`,
-`bus-routes` and `geocode`. Anything account-backed (`config`, `prefs`,
-`reminders`, `push`, `modes`) needs a real Supabase project, so sign-in and
-sync are not exercisable offline — run those against a preview deployment.
+`local/server.js` implements `check-key`, `bus-arrival`, `bus-stops`,
+`bus-routes`, `geocode` and `route-plan` (the last needs `ONEMAP_EMAIL` /
+`ONEMAP_PASSWORD` in the environment). Anything account-backed (`config`,
+`prefs`, `reminders`, `push`, `modes`, `rides`) needs a real Supabase project,
+so sign-in, sync and background pushes are not exercisable offline — run those
+against a preview deployment.

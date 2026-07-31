@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const webpush = require("web-push");
 
 const { SB_URL, fetchWithTimeout, serviceHeaders } = require("./_auth");
+const { trackRides } = require("./track-rides");
 
 const LTA_KEY = process.env.LTA_API_KEY;
 const CRON_SECRET = process.env.CRON_SECRET;
@@ -349,6 +350,17 @@ module.exports = async (req, res) => {
     })
   );
 
+  // Ride tracking rides along on the same minute tick, so one external pinger
+  // drives both. /api/track-rides exists as its own endpoint too, for anyone
+  // who wants it on a separate schedule.
+  let rides = null;
+  try {
+    rides = await trackRides();
+    errors.push(...rides.errors);
+  } catch (e) {
+    errors.push(`Ride tracking: ${e.message}`);
+  }
+
   res.json({
     ok: true,
     reminders: (reminders || []).length,
@@ -356,6 +368,7 @@ module.exports = async (req, res) => {
     checked,
     sent,
     expired,
+    rides: rides ? { tracked: rides.rides, sent: rides.sent, ended: rides.ended } : null,
     errors,
   });
 };

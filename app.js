@@ -57,6 +57,7 @@ let state = {
   departureReminders: JSON.parse(localStorage.getItem("bb_deptReminders") || "[]"),
   dropoffAlerts: JSON.parse(localStorage.getItem("bb_dropoffAlerts") || "[]"),
   modes: JSON.parse(localStorage.getItem("bb_modes") || "[]"),
+  rides: [],
   places: sanitizePlaces(JSON.parse(localStorage.getItem("bb_places") || "{}")),
   busStops: null,
   currentStop: null,
@@ -185,6 +186,7 @@ async function bootstrapApp() {
   // another device that this one has never seen.
   await restorePrefs();
   loadModes();
+  loadRides();
   startDepartureChecker();
   startArrivalTicker();
   maybeShowOnboarding();
@@ -2034,8 +2036,183 @@ function renderDropoffAlerts() {
     .join("");
 }
 
-function startDropoff(alertId) {
-  const alert = state.dropoffAlerts.find((a) => a.id === alertId);
+// ── Server-tracked rides ──
+//
+// The foreground watcher below can only run with the app open and the screen
+// awake. That is not the situation this feature exists for — you are on a bus,
+// phone in pocket, screen locked. And a PWA cannot fix it from the handset
+// side: navigator.geolocation doesn't exist in ServiceWorkerGlobalScope, and
+// Chrome cancelled the Geofencing API, so there is no way to watch your own
+// position in the background.
+//
+// So watch the bus instead. LTA's v3/BusArrival carries
+// NextBus.Latitude/Longitude — the live position of the vehicle — which
+// parseBusArrival used to throw away. The server polls that once a minute and
+// pushes when the bus reaches the stop before yours. It works with the app
+// closed, and a vehicle's own transponder is a better fix than a phone's.
+
+// Alerting when you reach your stop is too late to stand up and get to the
+// door, so the alert is anchored to the stop before it. The route sequence is
+// already loaded client-side, which means it can be resolved here once, at
+// creation time, instead of the server crawling BusRoutes on every tick.
+async function resolvePrevStop(serviceNo, destStopCode) {
+  const dirs = await getRouteDirections(serviceNo);
+  for (const d of dirs) {
+    const stops = await getRouteStops(serviceNo, d);
+    const i = stops.findIndex((s) => s.code === destStopCode);
+    if (i > 0) return { prev: stops[i - 1], dest: stops[i] };
+    if (i === 0) return { prev: null, dest: stops[0] };
+  }
+  return null;
+}
+
+async function loadRides() {
+  try {
+    const res = await authFetch("/api/rides");
+    if (!res.ok) return;
+    const { rides } = await res.json();
+    state.rides = Array.isArray(rides) ? rides : [];
+    renderDashRides();
+    renderRides();
+  } catch (e) {
+    console.error("Ride load failed:", e);
+  }
+}
+
+async function startServerTrackedRide(serviceNo, destStopCode) {
+  let resolved;
+  try {
+    resolved = await resolvePrevStop(serviceNo, destStopCode);
+  } catch {
+    showToast("Couldn't load that route.");
+    return null;
+  }
+  if (!resolved) {
+    showToast(`Bus ${serviceNo} doesn't stop there.`);
+    return null;
+  }
+  if (!resolved.prev) {
+    showToast("That's the first stop on the route — there's no earlier stop to warn you at.");
+    return null;
+  }
+  if (state.rides.some((r) => r.service === serviceNo && r.destStop === destStopCode)) {
+    showToast("You're already tracking that ride.");
+    return null;
+  }
+
+  const ride = {
+    id: newId(),
+    service: serviceNo,
+    destStop: destStopCode,
+    destName: resolved.dest.stop.Description,
+    destLat: resolved.dest.stop.Latitude,
+    destLng: resolved.dest.stop.Longitude,
+    prevStop: resolved.prev.code,
+    prevName: resolved.prev.stop.Description,
+    prevLat: resolved.prev.stop.Latitude,
+    prevLng: resolved.prev.stop.Longitude,
+    startedAt: new Date().toISOString(),
+  };
+
+  try {
+    const res = await authFetch("/api/rides", {
+      method: "POST",
+      body: JSON.stringify(ride),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.status);
+  } catch (e) {
+    showToast("Couldn't start tracking: " + e.message);
+    return null;
+  }
+
+  // Several rides can run at once — a two-bus journey arms both legs. Only the
+  // foreground watcher stays single, because there's only one phone to follow.
+  state.rides.push(ride);
+  renderDashRides();
+  renderRides();
+  return ride;
+}
+
+async function endServerTrackedRide(id) {
+  state.rides = state.rides.filter((r) => r.id !== id);
+  renderDashRides();
+  renderRides();
+  if (activeDropoff && activeDropoff.id === id) stopDropoff();
+  try {
+    await authFetch(`/api/rides?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+  } catch (e) {
+    console.error("Ride end failed:", e);
+  }
+}
+
+// Called from a service's stop list: "this is where I'm getting off".
+async function setRideDestination(destStopCode) {
+  if (!routeStopsService) return;
+  const ride = await startServerTrackedRide(routeStopsService, destStopCode);
+  if (!ride) return;
+  showToast(`Tracking bus ${ride.service} — you'll be alerted at ${ride.prevName}.`);
+  await renderRouteStopsList();
+}
+
+function rideCardHtml(r, compact) {
+  const watching = activeDropoff && activeDropoff.id === r.id;
+  return `
+    <div class="card dash-dropoff-card ${watching ? "dash-dropoff-active" : ""}">
+      <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+        ${watching ? '<div class="pulse"></div>' : ""}
+        <div style="min-width:0;">
+          <div class="reminder-value">Bus ${escapeHtml(r.service)} → ${escapeHtml(r.destName || r.destStop)}</div>
+          <div class="reminder-label">Alert at ${escapeHtml(r.prevName || r.prevStop)} &middot; tracked on the server${watching ? " &middot; also watching here" : ""}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:4px;align-items:center;flex:0 0 auto;">
+        ${compact ? "" : `<button class="btn btn-sm ${watching ? "btn-danger" : "btn-ghost"}" onclick="${watching ? "stopDropoff()" : `watchRideInForeground('${r.id}')`}">${watching ? "Stop" : "Watch"}</button>`}
+        <button class="icon-btn" onclick="endServerTrackedRide('${r.id}')" title="End ride" aria-label="End ride">&#10005;</button>
+      </div>
+    </div>`;
+}
+
+function renderRides() {
+  const container = document.getElementById("rideList");
+  if (!container) return;
+  if (state.rides.length === 0) {
+    container.innerHTML =
+      '<p style="color:var(--text2);font-size:13px;">No rides in progress. Open a bus route and tap &ldquo;Set as my stop&rdquo; on the stop you\'re getting off at.</p>';
+    return;
+  }
+  container.innerHTML = state.rides.map((r) => rideCardHtml(r, false)).join("");
+}
+
+function renderDashRides() {
+  const container = document.getElementById("dashRides");
+  const section = document.getElementById("dashRidesSection");
+  if (!container || !section) return;
+  section.classList.toggle("hidden", state.rides.length === 0);
+  container.innerHTML = state.rides.map((r) => rideCardHtml(r, true)).join("");
+}
+
+// Optional live distance readout while the app happens to be open. The push
+// is the real mechanism; this just shows progress when you're watching.
+function watchRideInForeground(rideId) {
+  const ride = state.rides.find((r) => r.id === rideId);
+  if (!ride) return;
+  startDropoff({
+    id: ride.id,
+    nickname: `Bus ${ride.service} → ${ride.destName || ride.destStop}`,
+    stopCode: ride.prevStop,
+    radius: 250,
+    lat: ride.prevLat,
+    lng: ride.prevLng,
+  });
+}
+
+// `alertOrId` is a drop-off alert id, or a ready-made target object (used by
+// rides, which geofence the stop *before* the destination).
+function startDropoff(alertOrId) {
+  const alert =
+    typeof alertOrId === "string"
+      ? state.dropoffAlerts.find((a) => a.id === alertOrId)
+      : alertOrId;
   if (!alert) return;
   if (!alert.lat || !alert.lng) {
     showToast("Coordinates not resolved yet. Try again in a moment.");
@@ -2077,6 +2254,7 @@ function startDropoff(alertId) {
   );
 
   renderDropoffAlerts();
+  renderRides();
   refreshDashboard();
 }
 
@@ -2089,6 +2267,7 @@ function stopDropoff() {
   releaseWakeLock();
   document.getElementById("dropoffBanner").classList.add("hidden");
   renderDropoffAlerts();
+  renderRides();
   refreshDashboard();
 }
 
@@ -2155,20 +2334,35 @@ async function loadModes() {
 
 function openModeModal() {
   document.getElementById("modeModal").classList.remove("hidden");
+  renderDayPicker("modeRepeatDays", [1, 2, 3, 4, 5]);
+  document.getElementById("modeRepeatOn").checked = false;
+  toggleModeRepeat();
   focusFirstInput("modeModal");
+}
+
+// A mode is on-demand by default: you activate it when you're actually going.
+// The old fixed "leave by" time and lead minutes forced every mode to be a
+// daily alarm, which is wrong for the trips people actually save — the ones
+// they take sometimes. Repeating is now opt-in.
+function toggleModeRepeat() {
+  const on = document.getElementById("modeRepeatOn").checked;
+  document.getElementById("modeRepeatFields").classList.toggle("hidden", !on);
 }
 
 async function saveMode() {
   const name = document.getElementById("modeNameInput").value.trim();
   const departureStop = document.getElementById("modeDeptStop").value.trim();
   const service = document.getElementById("modeDeptService").value.trim();
-  const leaveTime = document.getElementById("modeLeaveTime").value;
-  const leadMin = parseInt(document.getElementById("modeLeadMin").value) || 5;
   const dropoffStop = document.getElementById("modeDropoffStop").value.trim();
-  const dropoffRadius = parseInt(document.getElementById("modeDropoffRadius").value) || 300;
+  const repeatOn = document.getElementById("modeRepeatOn").checked;
+  const repeatTime = document.getElementById("modeRepeatTime").value;
 
   if (!name || !departureStop || !service || !dropoffStop) {
     showToast("Please fill in all required fields");
+    return;
+  }
+  if (repeatOn && !repeatTime) {
+    showToast("Pick a time for the repeat schedule");
     return;
   }
 
@@ -2177,12 +2371,10 @@ async function saveMode() {
     name,
     departureStop,
     service,
-    leaveTime,
-    leadMin,
     dropoffStop,
-    dropoffRadius,
-    dropoffLat: null,
-    dropoffLng: null,
+    repeat: repeatOn
+      ? { days: readDayPicker("modeRepeatDays"), time: repeatTime }
+      : null,
     active: false,
     createdVia: "app",
   };
@@ -2191,117 +2383,114 @@ async function saveMode() {
   await postModes(state.modes);
   document.getElementById("modeModal").classList.add("hidden");
   renderModes();
-  resolveModDropoffCoords(mode);
+  refreshDashboard();
   showToast("Journey mode saved");
 }
 
-async function resolveModDropoffCoords(mode) {
-  try {
-    const stops = await loadBusStops();
-    const stop = stops.find(s => s.BusStopCode === mode.dropoffStop);
-    if (stop) {
-      mode.dropoffLat = stop.Latitude;
-      mode.dropoffLng = stop.Longitude;
-      await postModes(state.modes);
-      renderModes();
-    }
-  } catch {}
+function modeRepeatSummary(m) {
+  if (!m.repeat || !m.repeat.time) return "On demand";
+  return `Repeats ${daysSummary(m.repeat.days)} at ${m.repeat.time}`;
+}
+
+function modeCardHtml(m, compact) {
+  return `
+    <div class="reminder-card${m.active ? " reminder-card--active" : ""}">
+      <div class="reminder-info">
+        <span class="reminder-value">${escapeHtml(m.name)}</span>
+        <span class="reminder-label">&#128652; Bus ${escapeHtml(m.service)} from stop ${escapeHtml(m.departureStop)} &rarr; stop ${escapeHtml(m.dropoffStop)}</span>
+        <span class="reminder-label">&#128197; ${escapeHtml(modeRepeatSummary(m))}</span>
+      </div>
+      <div style="display:flex;gap:4px;align-items:center;flex:0 0 auto;">
+        <button class="btn btn-sm${m.active ? " btn-danger" : ""}" onclick="${m.active ? `deactivateMode('${m.id}')` : `activateMode('${m.id}')`}">
+          ${m.active ? "Stop" : "Start"}
+        </button>
+        ${compact ? "" : `<button class="icon-btn" onclick="deleteMode('${m.id}')" title="Delete" aria-label="Delete mode">&#10005;</button>`}
+      </div>
+    </div>`;
 }
 
 function renderModes() {
   const container = document.getElementById("modesContainer");
   if (!container) return;
   if (state.modes.length === 0) {
-    container.innerHTML = '<p style="color:var(--text2);font-size:13px;">No modes saved yet. Add one to combine your bus reminder and drop-off alert in one tap.</p>';
+    container.innerHTML = '<p style="color:var(--text2);font-size:13px;">No modes saved yet. Add one to arm your departure reminder and drop-off alert in a single tap.</p>';
     return;
   }
-  container.innerHTML = state.modes.map(m => `
-    <div class="reminder-card${m.active ? " reminder-card--active" : ""}">
-      <div class="reminder-info">
-        <span class="reminder-value">${escapeHtml(m.name)}</span>
-        <span class="reminder-label">&#128652; Bus ${escapeHtml(m.service)} from stop ${escapeHtml(m.departureStop)} &middot; Leave by ${escapeHtml(m.leaveTime)} &middot; ${escapeHtml(m.leadMin)}min alert</span>
-        <span class="reminder-label">&#128205; Drop-off stop ${escapeHtml(m.dropoffStop)} &middot; ${escapeHtml(m.dropoffRadius)}m ${m.dropoffLat ? "&#9989;" : "&#9888; resolving..."}</span>
-      </div>
-      <div style="display:flex;gap:4px;align-items:center;">
-        <button class="btn btn-sm${m.active ? " btn-danger" : ""}" onclick="${m.active ? `deactivateMode('${m.id}')` : `activateMode('${m.id}')`}">
-          ${m.active ? "Deactivate" : "Activate"}
-        </button>
-        <button class="icon-btn" onclick="deleteMode('${m.id}')" title="Delete">&#10005;</button>
-      </div>
-    </div>`).join("");
+  container.innerHTML = state.modes.map((m) => modeCardHtml(m, false)).join("");
+}
+
+// Modes are the thing people open the app to use, so they belong on Home, not
+// buried two taps deep on the Reminders tab.
+function renderDashModes() {
+  const container = document.getElementById("dashModes");
+  const empty = document.getElementById("dashModesEmpty");
+  if (!container) return;
+  if (state.modes.length === 0) {
+    container.innerHTML = "";
+    if (empty) empty.classList.remove("hidden");
+    return;
+  }
+  if (empty) empty.classList.add("hidden");
+  container.innerHTML = state.modes.map((m) => modeCardHtml(m, true)).join("");
 }
 
 async function activateMode(id) {
-  const prev = state.modes.find(m => m.active);
-  if (prev && prev.id !== id) await deactivateMode(prev.id);
-
   const mode = state.modes.find(m => m.id === id);
   if (!mode) return;
-  if (!mode.dropoffLat || !mode.dropoffLng) {
-    showToast("Coordinates not resolved yet. Try again in a moment.");
-    return;
-  }
 
-  // The derived reminder used to take the id `mode_<modeId>`, which is no
-  // longer a legal primary key. Reuse the existing derived row's id when
-  // re-activating so its firing history survives, and only mint a new one the
-  // first time.
+  // Arming the drop-off is server-side now, so several modes can be running at
+  // once — the old "one active mode" rule existed only because the foreground
+  // GPS watcher could follow one destination at a time.
+  const ride = await startServerTrackedRide(mode.service, mode.dropoffStop);
+  if (!ride) return;
+
+  // Only a repeating mode gets a scheduled reminder. An on-demand one is
+  // already happening — you just started it — so a "time to leave" alert for
+  // it would be nonsense.
   const prevReminder = state.departureReminders.find((r) => r.fromMode === mode.id);
-  const reminder = {
-    id: prevReminder?.id || newId(),
-    type: "scheduled",
-    stop: mode.departureStop,
-    service: mode.service,
-    time: mode.leaveTime,
-    leadMin: mode.leadMin,
-    nickname: mode.name,
-    enabled: true,
-    fromMode: mode.id,
-  };
   state.departureReminders = state.departureReminders.filter(r => r.fromMode !== mode.id);
-  state.departureReminders.push(reminder);
+  if (mode.repeat && mode.repeat.time) {
+    state.departureReminders.push({
+      // Reuse the existing derived row's id so its firing history survives.
+      id: prevReminder?.id || newId(),
+      type: "scheduled",
+      stop: mode.departureStop,
+      service: mode.service,
+      time: mode.repeat.time,
+      days: mode.repeat.days || [],
+      leadMin: state.reminderLeadMin,
+      nickname: mode.name,
+      enabled: true,
+      fromMode: mode.id,
+    });
+  }
   localStorage.setItem("bb_deptReminders", JSON.stringify(state.departureReminders));
 
-  const prevDropoff = state.dropoffAlerts.find((a) => a.fromMode === mode.id);
-  const dropoff = {
-    id: prevDropoff?.id || newId(),
-    stopCode: mode.dropoffStop,
-    radius: mode.dropoffRadius,
-    nickname: mode.name,
-    lat: mode.dropoffLat,
-    lng: mode.dropoffLng,
-    fromMode: mode.id,
-  };
-  state.dropoffAlerts = state.dropoffAlerts.filter(a => a.fromMode !== mode.id);
-  state.dropoffAlerts.push(dropoff);
-  localStorage.setItem("bb_dropoffAlerts", JSON.stringify(state.dropoffAlerts));
-
   mode.active = true;
+  mode.rideId = ride.id;
   await postModes(state.modes);
   syncPushReminders();
-  syncPrefs();
-  startDropoff(dropoff.id);
   renderModes();
   renderDepartureReminders();
+  refreshDashboard();
+  showToast(`${mode.name} started — alerting at ${ride.prevName}.`);
 }
 
 async function deactivateMode(id) {
   const mode = state.modes.find(m => m.id === id);
   if (!mode) return;
 
-  if (activeDropoff && activeDropoff.fromMode === mode.id) stopDropoff();
+  if (mode.rideId) await endServerTrackedRide(mode.rideId);
   state.departureReminders = state.departureReminders.filter(r => r.fromMode !== mode.id);
   localStorage.setItem("bb_deptReminders", JSON.stringify(state.departureReminders));
-  state.dropoffAlerts = state.dropoffAlerts.filter(a => a.fromMode !== mode.id);
-  localStorage.setItem("bb_dropoffAlerts", JSON.stringify(state.dropoffAlerts));
 
   mode.active = false;
+  mode.rideId = null;
   await postModes(state.modes);
   syncPushReminders();
-  syncPrefs();
   renderModes();
   renderDepartureReminders();
-  renderDropoffAlerts();
+  refreshDashboard();
 }
 
 async function deleteMode(id) {
@@ -2310,12 +2499,15 @@ async function deleteMode(id) {
   state.modes = state.modes.filter(m => m.id !== id);
   await postModes(state.modes);
   renderModes();
+  refreshDashboard();
 }
 
 // ── Dashboard ──
 function refreshDashboard() {
   renderPlaces();
   renderDashFavourites();
+  renderDashModes();
+  renderDashRides();
   renderDashReminders();
   renderDashDropoffs();
   refreshDashNearby();
@@ -2932,6 +3124,9 @@ async function renderRouteStopsList() {
       // carries both halves of the identity, which is exactly what a
       // service-level favourite needs.
       const starred = isFav(s.code, routeStopsService);
+      const tracking = state.rides.find(
+        (r) => r.service === routeStopsService && r.destStop === s.code
+      )?.id;
       return `
         <div class="route-stop-item ${cls}">
           <button class="route-stop-main" onclick="openRouteStopDetail('${s.code}')" aria-label="${escapeHtml(s.stop.Description)}, view stop details">
@@ -2946,6 +3141,10 @@ async function renderRouteStopsList() {
                   onclick="toggleFavService('${s.code}','${jsArg(routeStopsService)}').then(renderRouteStopsList)"
                   title="Favourite bus ${escapeHtml(routeStopsService)} here"
                   aria-label="Favourite bus ${escapeHtml(routeStopsService)} at ${escapeHtml(s.stop.Description)}">&#9733;</button>
+          <button class="icon-btn route-stop-fav ${tracking ? "active" : ""}"
+                  onclick="${tracking ? `endServerTrackedRide('${tracking}').then(renderRouteStopsList)` : `setRideDestination('${s.code}')`}"
+                  title="${tracking ? "Stop tracking this ride" : "Set as my stop — alert me one stop early"}"
+                  aria-label="${tracking ? "Stop tracking" : "Set as my stop"} for ${escapeHtml(s.stop.Description)}">&#128205;</button>
         </div>`;
     })
     .join("");

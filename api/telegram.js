@@ -116,21 +116,6 @@ async function delSession(chatId) {
   });
 }
 
-function normalizeTime(input) {
-  const s = input.trim().toLowerCase();
-  const m12 = s.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/);
-  if (m12) {
-    let h = parseInt(m12[1]);
-    const m = parseInt(m12[2] || "0");
-    if (m12[3] === "pm" && h !== 12) h += 12;
-    if (m12[3] === "am" && h === 12) h = 0;
-    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-  }
-  const m24 = s.match(/^(\d{1,2}):(\d{2})$/);
-  if (m24) return `${String(parseInt(m24[1])).padStart(2, "0")}:${m24[2]}`;
-  return null;
-}
-
 // Telegram messages are parse_mode: HTML, so anything the user typed back at
 // us has to be escaped before it's echoed into a message.
 function esc(str) {
@@ -140,14 +125,15 @@ function esc(str) {
     .replace(/>/g, "&gt;");
 }
 
+// Modes no longer carry a fixed leave time, lead time or geofence radius: a
+// mode is started when you're actually travelling, and the drop-off alert is
+// anchored to the stop before your destination rather than a radius you had to
+// guess at. Repeat schedules are set in the app, where there's a day picker.
 const STEPS = [
   { key: "name", prompt: "What would you like to call this mode?\n(e.g. <i>Going home from Beyoncé's house</i>)" },
   { key: "departureStop", prompt: "Departure bus stop code? (e.g. <code>83139</code>)" },
   { key: "service", prompt: "Bus service number? (e.g. <code>14</code>)" },
-  { key: "leaveTime", prompt: "Leave by what time? (e.g. <code>18:00</code> or <code>6pm</code>)" },
-  { key: "leadMin", prompt: "Alert when bus is within how many minutes? (1–30)\nSend <code>skip</code> for default (5 min)." },
   { key: "dropoffStop", prompt: "Destination bus stop code for the drop-off alert? (e.g. <code>44009</code>)" },
-  { key: "dropoffRadius", prompt: "Drop-off alert radius in metres? (100–1000)\nSend <code>skip</code> for default (300m)." },
 ];
 
 const LINK_HINT =
@@ -224,8 +210,9 @@ module.exports = async (req, res) => {
       const list = modes
         .map((m, i) =>
           `${i + 1}. <b>${esc(m.name)}</b>\n` +
-          `   🚌 Bus ${esc(m.service)} from stop ${esc(m.departureStop)}, leave by ${esc(m.leaveTime)} (${esc(m.leadMin)}min alert)\n` +
-          `   📍 Drop-off: stop ${esc(m.dropoffStop)} (${esc(m.dropoffRadius)}m radius)`
+          `   🚌 Bus ${esc(m.service)} from stop ${esc(m.departureStop)}\n` +
+          `   📍 Drop-off: stop ${esc(m.dropoffStop)}` +
+          (m.repeat && m.repeat.time ? `\n   ⏰ Repeats at ${esc(m.repeat.time)}` : "")
         )
         .join("\n\n");
       await sendMessage(chatId, `Your journey modes:\n\n${list}\n\nUse /deletemode &lt;number&gt; to remove one.`);
@@ -268,27 +255,11 @@ module.exports = async (req, res) => {
   }
 
   const step = STEPS[conv.step];
-  let value = text;
-  const isSkip = /^(skip|default|-)$/i.test(text);
+  const value = text;
 
-  if (step.key === "leaveTime") {
-    value = normalizeTime(text);
-    if (!value) {
-      await sendMessage(chatId, "Couldn't parse that time. Try something like <code>18:00</code> or <code>6pm</code>.");
-      return res.status(200).end();
-    }
-  } else if (step.key === "leadMin") {
-    value = isSkip ? 5 : parseInt(text);
-    if (isNaN(value) || value < 1 || value > 30) {
-      await sendMessage(chatId, "Please enter a number between 1 and 30, or <code>skip</code> for the default (5 min).");
-      return res.status(200).end();
-    }
-  } else if (step.key === "dropoffRadius") {
-    value = isSkip ? 300 : parseInt(text);
-    if (isNaN(value) || value < 100 || value > 1000) {
-      await sendMessage(chatId, "Please enter a radius between 100 and 1000 metres, or <code>skip</code> for default (300m).");
-      return res.status(200).end();
-    }
+  if ((step.key === "departureStop" || step.key === "dropoffStop") && !/^\d{5}$/.test(text)) {
+    await sendMessage(chatId, "Bus stop codes are 5 digits (e.g. <code>83139</code>). Try again, or /cancel.");
+    return res.status(200).end();
   }
 
   conv.data[step.key] = value;
@@ -305,12 +276,8 @@ module.exports = async (req, res) => {
       name: d.name,
       departureStop: d.departureStop,
       service: d.service,
-      leaveTime: d.leaveTime,
-      leadMin: d.leadMin,
       dropoffStop: d.dropoffStop,
-      dropoffRadius: d.dropoffRadius,
-      dropoffLat: null,
-      dropoffLng: null,
+      repeat: null,
       active: false,
       createdVia: "telegram",
     };
@@ -318,9 +285,8 @@ module.exports = async (req, res) => {
     await sendMessage(chatId,
       `✅ Mode "<b>${esc(mode.name)}</b>" saved!\n\n` +
       `🚌 Bus ${esc(mode.service)} from stop ${esc(mode.departureStop)}\n` +
-      `⏰ Leave by ${esc(mode.leaveTime)} · alert ${esc(mode.leadMin)} min before\n` +
-      `📍 Drop-off at stop ${esc(mode.dropoffStop)} · ${esc(mode.dropoffRadius)}m radius\n\n` +
-      `Open the app to activate it!`
+      `📍 Drop-off at stop ${esc(mode.dropoffStop)} — you'll be alerted one stop early\n\n` +
+      `Open the app to start it, or to give it a repeat schedule.`
     );
   }
 

@@ -1,5 +1,5 @@
-const CACHE = "bus-buddy-v12";
-const ASSETS = ["/", "/app.js", "/auth.js", "/i18n.js", "/manifest.json"];
+const CACHE = "bus-buddy-v13";
+const ASSETS = ["/", "/app.js", "/auth.js", "/journey.js", "/i18n.js", "/manifest.json"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)));
