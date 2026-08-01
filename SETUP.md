@@ -263,6 +263,21 @@ Then in the app: **Settings → Telegram → Get link code**, and send
 
 ## 8. Verify
 
+The quickest check is the smoke script, which confirms the migration ran, the
+env vars landed, and the auth gate actually refuses anonymous callers:
+
+```bash
+node scripts/verify-deploy.js https://<your-app>.vercel.app
+
+# include the cron check too:
+CRON_SECRET=... node scripts/verify-deploy.js https://<your-app>.vercel.app
+```
+
+It reads only public values — no endpoint it touches returns a secret, and it
+never asks for the service-role key or the OneMap password. The manual checks
+below cover the things a script can't: phones, pushes and real journeys.
+
+
 1. **Accounts** — sign up with email/password (a 6-character password should be
    rejected client-side), then sign in with Google. Confirm the app is
    unreachable while signed out. In Supabase, check that new rows carry a
