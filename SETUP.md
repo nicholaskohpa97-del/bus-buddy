@@ -69,8 +69,12 @@ Redeploy after adding these.
 
 ## 4. Database schema
 
-Run this in the Supabase SQL editor. It replaces the old `push_subs` and
-`modes` tables.
+Paste [`supabase/migration.sql`](supabase/migration.sql) into the Supabase SQL
+editor (Dashboard → SQL Editor → New query) and run it. It's reproduced below.
+
+It **drops** the old `push_subs` and `modes` tables. That's deliberate: both
+were keyed by a random localStorage device id with no user column, so there is
+no correct account to migrate their rows to.
 
 ```sql
 -- ── Clean up the pre-accounts schema ─────────────────────────────────────
