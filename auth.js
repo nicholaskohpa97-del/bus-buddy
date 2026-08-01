@@ -225,13 +225,54 @@ async function initAuth() {
     },
   });
 
-  const { data } = await sb.auth.getSession();
-  await applySession(data?.session || null);
+  // A stored session can be corrupt, and storage can be unavailable entirely
+  // (Safari private browsing, blocked third-party storage). Neither should
+  // cost the user the login form — treat a session we can't read as no
+  // session rather than letting the throw escape.
+  let session = null;
+  try {
+    const { data } = await sb.auth.getSession();
+    session = data?.session || null;
+  } catch (e) {
+    console.error("Session read failed:", e);
+    try {
+      await sb.auth.signOut({ scope: "local" });
+    } catch {
+      /* nothing left to clean up */
+    }
+  }
+  await applySession(session);
 
-  sb.auth.onAuthStateChange(async (event, session) => {
+  sb.auth.onAuthStateChange(async (event, s) => {
     if (event === "SIGNED_OUT") return handleSignedOut();
-    if (session && !bbUser) await applySession(session);
+    if (s && !bbUser) await applySession(s);
   });
+}
+
+// The gate hides the header, main and nav until a session resolves, which
+// means any unhandled failure in the boot path above leaves a blank page with
+// no way forward — the worst possible outcome, and unrecoverable without
+// devtools. These two failsafes guarantee the login form appears no matter
+// what: one for a thrown error, one for a boot that simply never finishes.
+function failOpen(message) {
+  if (bbUser) return; // already signed in and running
+  showAuthScreen();
+  if (message) authError(message);
+}
+
+async function bootAuth() {
+  const watchdog = setTimeout(
+    () => failOpen("Sign-in is taking longer than expected. Check your connection and reload."),
+    10000
+  );
+  try {
+    await initAuth();
+  } catch (e) {
+    console.error("Auth init failed:", e);
+    failOpen("Couldn't start sign-in: " + (e.message || "unknown error"));
+  } finally {
+    clearTimeout(watchdog);
+  }
 }
 
 async function applySession(session) {
@@ -255,7 +296,18 @@ function renderAccountRow() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  initTheme();
-  authSetMode("signin");
-  initAuth();
+  // Each of these is defensive on its own: if initTheme or authSetMode throws
+  // (a renamed element, a half-applied deploy), the login form must still come
+  // up rather than taking the whole page down with it.
+  try {
+    initTheme();
+  } catch (e) {
+    console.error("Theme init failed:", e);
+  }
+  try {
+    authSetMode("signin");
+  } catch (e) {
+    console.error("Auth UI init failed:", e);
+  }
+  bootAuth();
 });

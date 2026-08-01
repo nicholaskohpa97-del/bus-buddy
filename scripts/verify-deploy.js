@@ -50,8 +50,38 @@ async function main() {
   // ── 1. The app is served at all ──
   const root = await get(base);
   record("app responds", root.status === 200, `HTTP ${root.status || root.error}`);
+  if (root.status === 401 || root.status === 403) {
+    console.log(
+      `  ✗  ${base} returned HTTP ${root.status}.\n` +
+        "     That's Vercel Deployment Protection, not a config problem —\n" +
+        "     Vercel → Project → Settings → Deployment Protection → disable\n" +
+        "     Vercel Authentication for production. Nothing else can be checked\n" +
+        "     until then.\n"
+    );
+    process.exit(1);
+  }
 
-  // ── 2. Supabase config reaches the browser ──
+  // ── 2. Is the new code actually live? ──
+  // Checked before anything else, because every check below fails in a
+  // misleading way when the deploy simply hasn't happened — an old build has
+  // no /api/config, which reads as "SUPABASE_URL not set" rather than "this
+  // endpoint doesn't exist yet".
+  const authJs = await get(`${base}/auth.js`);
+  const deployed = authJs.status === 200;
+  record(
+    "accounts build deployed",
+    deployed,
+    deployed ? "auth.js served" : `auth.js → HTTP ${authJs.status} — Vercel is still serving the old build`
+  );
+  if (!deployed) {
+    console.log(
+      "\n  The accounts branch isn't live yet. Check Vercel → Deployments:\n" +
+        "  either the build failed, or the project isn't set to auto-deploy main.\n" +
+        "  Nothing below will be meaningful until it is.\n"
+    );
+  }
+
+  // ── 3. Supabase config reaches the browser ──
   // Without this the auth screen shows a configuration error and the app is
   // unreachable, so it's the single most important check here.
   const cfg = await get(`${base}/api/config`);
@@ -68,7 +98,7 @@ async function main() {
     anonKey ? `${anonKey.slice(0, 8)}… (${anonKey.length} chars)` : "empty"
   );
 
-  // ── 3. Other server-side env vars ──
+  // ── 4. Other server-side env vars ──
   const key = await get(`${base}/api/check-key`);
   record("LTA_API_KEY set", key.json?.hasKey === true, key.json?.hasKey ? "yes" : "no — arrivals won't load");
 
@@ -87,7 +117,7 @@ async function main() {
     onemap.json?.ok ? "token minted" : onemap.json?.error || `HTTP ${onemap.status}`
   );
 
-  // ── 4. The auth gate gates ──
+  // ── 5. The auth gate gates ──
   // An unauthenticated call to a user-scoped route must be refused. A 200 here
   // would mean anyone can read anyone's data.
   for (const path of ["/api/prefs", "/api/reminders", "/api/modes", "/api/rides", "/api/push"]) {
@@ -95,7 +125,7 @@ async function main() {
     record(`${path} refuses anonymous callers`, r.status === 401, `HTTP ${r.status}`);
   }
 
-  // ── 5. The migration ran ──
+  // ── 6. The migration ran ──
   // Queried with the anon key. A missing table answers 404 (PGRST205); a table
   // that exists but is protected by RLS answers 200 with an empty array,
   // because RLS filters rows rather than erroring. Both are distinguishable,
@@ -131,7 +161,7 @@ async function main() {
     record("migration check", null, "skipped — no Supabase config to query with");
   }
 
-  // ── 6. Cron health (optional) ──
+  // ── 7. Cron health (optional) ──
   if (process.env.CRON_SECRET) {
     const probe = await get(`${base}/api/check-reminders?probe=1`, {
       headers: { Authorization: `Bearer ${process.env.CRON_SECRET}` },
