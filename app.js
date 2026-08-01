@@ -14,15 +14,54 @@ function sanitizePlaces(places) {
   return clean;
 }
 
+// Reminders and modes are rows in Postgres now, with uuid primary keys, so
+// ids have to be minted as uuids rather than the old `Date.now()` strings.
+function newId() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  // Safari < 15.4 has crypto.getRandomValues but not randomUUID.
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = [...b].map((x) => x.toString(16).padStart(2, "0"));
+  return `${h.slice(0, 4).join("")}-${h.slice(4, 6).join("")}-${h.slice(6, 8).join("")}-${h.slice(8, 10).join("")}-${h.slice(10, 16).join("")}`;
+}
+
+// A favourite is now { code, name, service, addedAt }: a whole stop when
+// `service` is null, or one specific bus at that stop when it's set. The old
+// {code, name} rows can't be upgraded — they were saved against a device id
+// with no account, and there's no way to guess which service was meant — so
+// the old key is dropped once, with a toast, rather than silently reinterpreted.
+const FAV_KEY = "bb_favourites_v2";
+const LEGACY_FAV_KEY = "bb_favourites";
+const FAV_RESET_FLAG = "bb_favReset_v2";
+const RECENT_KEY = "bb_recentSearches";
+const RECENT_MAX = 10;
+
+let favouritesWereReset = false;
+
+function clearLegacyFavourites() {
+  if (localStorage.getItem(FAV_RESET_FLAG)) return;
+  const had = !!localStorage.getItem(LEGACY_FAV_KEY);
+  localStorage.removeItem(LEGACY_FAV_KEY);
+  localStorage.setItem(FAV_RESET_FLAG, "1");
+  favouritesWereReset = had;
+}
+clearLegacyFavourites();
+
 // ── State ──
 let state = {
-  apiKey: localStorage.getItem("bb_apiKey") || "",
   refreshSec: parseInt(localStorage.getItem("bb_refreshSec") || "30"),
   reminderLeadMin: parseInt(localStorage.getItem("bb_reminderLead") || "5"),
-  favourites: JSON.parse(localStorage.getItem("bb_favourites") || "[]"),
+  favourites: JSON.parse(localStorage.getItem(FAV_KEY) || "[]"),
+  recentSearches: JSON.parse(localStorage.getItem(RECENT_KEY) || "[]"),
   departureReminders: JSON.parse(localStorage.getItem("bb_deptReminders") || "[]"),
   dropoffAlerts: JSON.parse(localStorage.getItem("bb_dropoffAlerts") || "[]"),
   modes: JSON.parse(localStorage.getItem("bb_modes") || "[]"),
+  rides: [],
+  // null means "not chosen yet" — the default is derived from favourites on
+  // first open of Settings, which is different from an explicit empty list
+  // (opted out of rail alerts entirely).
+  alertLines: JSON.parse(localStorage.getItem("bb_alertLines") || "null"),
   places: sanitizePlaces(JSON.parse(localStorage.getItem("bb_places") || "{}")),
   busStops: null,
   currentStop: null,
@@ -127,16 +166,10 @@ function dismissInstall() {
 }
 
 // ── Init ──
-document.addEventListener("DOMContentLoaded", async () => {
-  initTheme();
-  const keyCheck = await fetch("/api/check-key").then(r => r.json()).catch(() => ({ hasKey: false }));
-  if (keyCheck.hasKey) {
-    document.getElementById("apiKeyBar").classList.add("hidden");
-  } else if (state.apiKey) {
-    await setApiKey(state.apiKey);
-    document.getElementById("apiKeyBar").classList.add("hidden");
-  }
-  document.getElementById("apiKeyInput").value = state.apiKey;
+// Not a DOMContentLoaded handler any more: auth.js owns startup and calls this
+// only once there's a signed-in user, so no render path ever runs without a
+// user_id to scope its data to.
+async function bootstrapApp() {
   document.getElementById("refreshInterval").value = state.refreshSec;
   document.getElementById("reminderLead").value = state.reminderLeadMin;
   document
@@ -149,29 +182,28 @@ document.addEventListener("DOMContentLoaded", async () => {
   renderDepartureReminders();
   renderDropoffAlerts();
   renderPlaces();
-  loadModes();
   refreshDashboard();
   startDashAutoRefresh();
   requestNotificationPermission();
   initPush();
-  restorePrefs();
+  // Server state first: this account may have favourites and reminders set on
+  // another device that this one has never seen.
+  await restorePrefs();
+  loadModes();
+  loadRides();
+  ensureAlertLines().catch(() => {});
   startDepartureChecker();
   startArrivalTicker();
   maybeShowOnboarding();
+  if (favouritesWereReset) {
+    showToast("Favourites were reset — you can now star a whole stop or a single bus.");
+  }
   document.addEventListener('click', unlockAudio, { once: true });
   document.addEventListener('touchstart', unlockAudio, { once: true });
   if (window.__hideSplash) window.__hideSplash();
-});
-
-// ── API ──
-async function setApiKey(key) {
-  await fetch("/api/set-key", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key }),
-  });
 }
 
+// ── API ──
 async function fetchArrivals(stopCode, serviceNo) {
   let url = `/api/bus-arrival?BusStopCode=${stopCode}`;
   if (serviceNo) url += `&ServiceNo=${serviceNo}`;
@@ -431,9 +463,12 @@ function isLastBusArrival(estimatedArrivalIso, lastBusMinutes) {
 }
 
 // ── Stop classification: bus interchanges & MRT/LRT-connected stops ──
-// SG bus-stop Descriptions name station stops "…Stn" and interchanges "…Int".
-// We derive station locations from those, then also flag nearby stops by
-// proximity — so detection uses both naming convention and location.
+// This used to guess: it took every bus stop whose Description matched
+// /\bstn\b/i as evidence of a station, then flagged anything within 150 m of
+// one. That invents stations from any description containing "stn" and misses
+// every real station whose surrounding stops aren't named after it. Now that
+// data/mrt.json ships the actual network, proximity to a real station answers
+// it — with the old heuristic kept only as a fallback if that file can't load.
 let stationAnchors = null;
 const stopClassCache = new Map();
 
@@ -446,21 +481,36 @@ async function getStationAnchors() {
   return stationAnchors;
 }
 
-// Returns { interchange, mrt } for a stop, memoized by BusStopCode.
+// Returns { interchange, mrt, station } for a stop, memoized by BusStopCode.
+// `station` names the rail station when one is close enough to walk to.
 async function classifyStop(stop) {
-  if (!stop) return { interchange: false, mrt: false };
+  if (!stop) return { interchange: false, mrt: false, station: null };
   const cached = stopClassCache.get(stop.BusStopCode);
   if (cached) return cached;
   const desc = stop.Description || "";
   const interchange = /\bint\b/i.test(desc);
-  let mrt = /\bstn\b/i.test(desc);
-  if (!mrt) {
-    const anchors = await getStationAnchors();
-    mrt = anchors.some(
-      ([lat, lng]) => haversine(stop.Latitude, stop.Longitude, lat, lng) <= 150
-    );
+
+  let mrt = false;
+  let station = null;
+  try {
+    const near = await mrtStationsNear(stop.Latitude, stop.Longitude);
+    if (near.length > 0) {
+      mrt = true;
+      station = near[0].station.name;
+    }
+  } catch {
+    // Rail data unavailable — fall back to the naming/proximity heuristic
+    // rather than dropping the badge entirely.
+    mrt = /\bstn\b/i.test(desc);
+    if (!mrt) {
+      const anchors = await getStationAnchors();
+      mrt = anchors.some(
+        ([lat, lng]) => haversine(stop.Latitude, stop.Longitude, lat, lng) <= 150
+      );
+    }
   }
-  const result = { interchange, mrt };
+
+  const result = { interchange, mrt, station };
   stopClassCache.set(stop.BusStopCode, result);
   return result;
 }
@@ -468,7 +518,8 @@ async function classifyStop(stop) {
 // Badge markup for a classified stop (reused by list + detail).
 function stopTagsHtml(cls) {
   let html = "";
-  if (cls.mrt) html += '<span class="route-tag route-tag-mrt">🚆 MRT</span>';
+  if (cls.mrt)
+    html += `<span class="route-tag route-tag-mrt" title="${cls.station ? escapeHtml(cls.station) + " station" : "Near a rail station"}">🚆 ${escapeHtml(cls.station || "MRT")}</span>`;
   if (cls.interchange) html += '<span class="route-tag route-tag-int">🔁 Int</span>';
   return html;
 }
@@ -606,6 +657,95 @@ const SEARCH_SCOPES = {
   home: { input: "homeStopSearch", results: "homeSearchResults", nearby: "homeNearbyResults" },
 };
 
+// ── Recent searches ──
+// Recorded on *selection*, not on keystroke. A half-typed query is noise; the
+// thing the user actually picked is the signal, and it's the only thing that
+// can be replayed as a one-tap shortcut.
+function recentIdentity(e) {
+  if (e.type === "stop") return `stop:${e.code}`;
+  if (e.type === "service") return `service:${e.service}`;
+  return `address:${(e.label || "").toLowerCase()}`;
+}
+
+function recordRecentSearch(entry) {
+  if (!entry || !entry.label) return;
+  const id = recentIdentity(entry);
+  state.recentSearches = [
+    { ...entry, at: Date.now() },
+    ...state.recentSearches.filter((e) => recentIdentity(e) !== id),
+  ].slice(0, RECENT_MAX);
+  localStorage.setItem(RECENT_KEY, JSON.stringify(state.recentSearches));
+  syncPrefs();
+}
+
+function removeRecentSearch(id) {
+  state.recentSearches = state.recentSearches.filter((e) => recentIdentity(e) !== id);
+  localStorage.setItem(RECENT_KEY, JSON.stringify(state.recentSearches));
+  syncPrefs();
+  // Re-render every scope: both search bars can be showing this list.
+  Object.keys(SEARCH_SCOPES).forEach(renderRecentSearches);
+}
+
+function clearRecentSearches() {
+  state.recentSearches = [];
+  localStorage.setItem(RECENT_KEY, "[]");
+  syncPrefs();
+  Object.keys(SEARCH_SCOPES).forEach(renderRecentSearches);
+}
+
+const RECENT_ICONS = { stop: "🚏", service: "🚌", address: "📍" };
+
+function renderRecentSearches(scope = "arrivals") {
+  const cfg = SEARCH_SCOPES[scope];
+  const container = document.getElementById(cfg.results);
+  if (!container) return;
+  if (state.recentSearches.length === 0) {
+    container.classList.add("hidden");
+    container.innerHTML = "";
+    return;
+  }
+  const rows = state.recentSearches
+    .map((e) => {
+      const id = recentIdentity(e);
+      const onSelect =
+        e.type === "stop"
+          ? `selectStop('${e.code}','${scope}')`
+          : e.type === "service"
+          ? `selectService('${jsArg(e.service)}','${scope}')`
+          : `replayAddressSearch('${jsArg(e.label)}','${scope}')`;
+      const detail =
+        e.type === "stop"
+          ? e.code
+          : e.type === "service"
+          ? "Tap to view route &amp; stops"
+          : "Address";
+      return `
+      <div class="recent-item">
+        <span class="recent-icon" aria-hidden="true">${RECENT_ICONS[e.type] || "🔎"}</span>
+        <div class="search-result-item" onclick="${onSelect}">
+          <div class="search-result-name">${escapeHtml(e.label)}</div>
+          <div class="search-result-detail">${detail}</div>
+        </div>
+        <button class="recent-remove" onclick="event.stopPropagation();removeRecentSearch('${jsArg(id)}')"
+                title="Remove" aria-label="Remove ${escapeHtml(e.label)} from recent searches">&#10005;</button>
+      </div>`;
+    })
+    .join("");
+  container.innerHTML = `
+    <div class="recent-header">
+      <h4>Recent</h4>
+      <button class="recent-clear" onclick="clearRecentSearches()">Clear all</button>
+    </div>
+    ${rows}`;
+  container.classList.remove("hidden");
+}
+
+function replayAddressSearch(label, scope = "arrivals") {
+  const cfg = SEARCH_SCOPES[scope];
+  document.getElementById(cfg.input).value = label;
+  handleSearch(label, scope);
+}
+
 let searchDebounce = null;
 let searchGeneration = 0;
 async function handleSearch(val, scope = "arrivals") {
@@ -614,9 +754,9 @@ async function handleSearch(val, scope = "arrivals") {
   const container = document.getElementById(cfg.results);
   const trimmed = (val || "").trim();
   if (!trimmed) {
-    // Query cleared back to empty while still focused — re-offer nearby
-    // suggestions since no fresh "focus" event fires in that case.
-    container.classList.add("hidden");
+    // Query cleared back to empty while still focused — re-offer history and
+    // nearby suggestions, since no fresh "focus" event fires in that case.
+    renderRecentSearches(scope);
     maybeSuggestNearby(scope);
     return;
   }
@@ -663,7 +803,7 @@ async function handleSearch(val, scope = "arrivals") {
           html += services
             .map(
               (no) => `
-            <div class="search-result-item search-result-item-service" onclick="selectService('${escapeHtml(no)}','${scope}')">
+            <div class="search-result-item search-result-item-service" onclick="selectService('${jsArg(no)}','${scope}')">
               <div class="search-result-name">&#128652; Bus ${escapeHtml(no)}</div>
               <div class="search-result-detail">Tap to view route &amp; stops</div>
             </div>`
@@ -711,10 +851,11 @@ function selectService(serviceNo, scope = "arrivals") {
   const cfg = SEARCH_SCOPES[scope];
   document.getElementById(cfg.results).classList.add("hidden");
   document.getElementById(cfg.nearby).classList.add("hidden");
+  recordRecentSearch({ type: "service", label: `Bus ${serviceNo}`, service: serviceNo });
   openRouteStops(serviceNo);
 }
 
-function selectStop(code, scope = "arrivals") {
+async function selectStop(code, scope = "arrivals") {
   const cfg = SEARCH_SCOPES[scope];
   document.getElementById(cfg.input).value = code;
   document.getElementById(cfg.results).classList.add("hidden");
@@ -722,6 +863,7 @@ function selectStop(code, scope = "arrivals") {
   switchTab("arrivals");
   document.getElementById("stopSearch").value = code;
   searchStop();
+  recordRecentSearch({ type: "stop", label: await getStopName(code), code });
 }
 
 // ── Reusable stop autocomplete (attached to any bus-stop input) ──
@@ -923,6 +1065,12 @@ function attachAddressAutocomplete(input) {
     input.dataset.lng = m.longitude;
     input.dataset.postal = m.postal || "";
     input.dataset.resolvedFor = input.value;
+    recordRecentSearch({
+      type: "address",
+      label: m.address || input.value,
+      lat: m.latitude,
+      lng: m.longitude,
+    });
     close();
     input.focus();
   };
@@ -1056,7 +1204,7 @@ async function loadArrivals(stopCode) {
     state.currentStop = stopCode;
 
     const stopName = await getStopName(stopCode);
-    const isFav = state.favourites.some((f) => f.code === stopCode);
+    const stopIsFav = isFav(stopCode, null);
 
     const liveByNo = new Map();
     (data.Services || []).forEach((svc) => {
@@ -1078,10 +1226,10 @@ async function loadArrivals(stopCode) {
         <div class="card">
           <div class="bus-stop-header">
             <div>
-              <h3>${stopName}</h3>
+              <h3>${escapeHtml(stopName)}</h3>
               <span class="bus-stop-code">${stopCode}</span>
             </div>
-            <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${escapeHtml(stopName)}')" title="Favourite">&#9733;</button>
+            <button class="icon-btn ${stopIsFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${jsArg(stopName)}',null)" title="Favourite all services at this stop" aria-label="Favourite this stop">&#9733;</button>
           </div>
           <div class="empty-state"><p>No bus services at this time.</p></div>
         </div>`;
@@ -1092,12 +1240,12 @@ async function loadArrivals(stopCode) {
       <div class="card">
         <div class="bus-stop-header">
           <div>
-            <h3>${stopName}</h3>
+            <h3>${escapeHtml(stopName)}</h3>
             <span class="bus-stop-code">${stopCode}</span>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <div class="auto-refresh"><div class="dot"></div> Live</div>
-            <button class="icon-btn ${isFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${escapeHtml(stopName)}')" title="Favourite">&#9733;</button>
+            <button class="icon-btn ${stopIsFav ? "active" : ""}" onclick="toggleFav('${stopCode}','${jsArg(stopName)}',null)" title="Favourite all services at this stop" aria-label="Favourite this stop">&#9733;</button>
           </div>
         </div>
         ${activeServices.length === 0 ? '<div class="empty-state" style="padding:16px 0;"><p>No bus services at this time.</p></div>' : ""}
@@ -1178,19 +1326,26 @@ function renderServiceRow(svc, stopCode, routeRow) {
         : "";
       const dataAttr = t.arrival ? ` data-arrival="${t.arrival}"` : "";
       const cssCls = isLast ? `${cls} last-bus` : cls;
-      return `<span class="arrival-badge ${cssCls}"${dataAttr}><span class="time-text">${badgeLabel(t.min)}</span>${meta}</span>`;
+      // Each chip is a real button: tapping one arms a one-shot reminder for
+      // that specific bus, so it has to be keyboard-reachable, not just
+      // tappable.
+      return `<button type="button" class="arrival-badge ${cssCls}"${dataAttr}
+        onclick="openOneShotPrompt('${stopCode}','${jsArg(svc.no)}','${t.arrival}')"
+        aria-label="Bus ${escapeHtml(svc.no)} in ${badgeLabel(t.min)} — remind me about this bus"
+        ><span class="time-text">${badgeLabel(t.min)}</span>${meta}</button>`;
     })
     .join("");
 
   return `
     <div class="service-row">
       <div class="service-number-wrap">
-        <button class="service-number" onclick="event.stopPropagation();openRouteStops('${svc.no}','${stopCode}')" aria-label="View stops for bus ${svc.no}">${svc.no}</button>
+        <button class="service-number" onclick="event.stopPropagation();openRouteStops('${svc.no}','${stopCode}')" aria-label="View stops for bus ${escapeHtml(svc.no)}">${escapeHtml(svc.no)}</button>
         ${scheduleLineHtml(sched)}
       </div>
       <div class="arrival-times">${badges}</div>
       <div class="service-actions">
-        <button class="icon-btn" onclick="quickDeptReminder('${stopCode}','${svc.no}')" title="Remind me" aria-label="Set reminder for bus ${svc.no}">&#128276;</button>
+        <button class="icon-btn ${isFav(stopCode, svc.no) ? "active" : ""}" onclick="toggleFavService('${stopCode}','${jsArg(svc.no)}')" title="Favourite this bus at this stop" aria-label="Favourite bus ${escapeHtml(svc.no)} at this stop">&#9733;</button>
+        <button class="icon-btn" onclick="quickDeptReminder('${stopCode}','${jsArg(svc.no)}')" title="Remind me" aria-label="Set reminder for bus ${escapeHtml(svc.no)}">&#128276;</button>
       </div>
     </div>`;
 }
@@ -1222,7 +1377,7 @@ function renderInactiveServiceRow(serviceNo, stopCode, routeRow) {
   return `
     <div class="service-row service-row--inactive">
       <div class="service-number-wrap">
-        <button class="service-number" onclick="event.stopPropagation();openRouteStops('${serviceNo}','${stopCode}')" aria-label="View stops for bus ${serviceNo}">${serviceNo}</button>
+        <button class="service-number" onclick="event.stopPropagation();openRouteStops('${serviceNo}','${stopCode}')" aria-label="View stops for bus ${escapeHtml(serviceNo)}">${escapeHtml(serviceNo)}</button>
         ${scheduleLineHtml(sched)}
       </div>
       <div class="arrival-times"><span class="arrival-badge na${ended ? " last-bus" : ""}"><span class="time-text">${escapeHtml(status)}</span></span></div>
@@ -1259,40 +1414,135 @@ function startAutoRefresh(stopCode) {
 }
 
 // ── Favourites ──
-function toggleFav(code, name) {
-  const idx = state.favourites.findIndex((f) => f.code === code);
+// Identity is (stop, service). Starring bus 165 at Orchard Stn and starring
+// the stop itself are two different saved things, so both keys go into the
+// comparison — matching on code alone is what made service-level favourites
+// impossible before.
+function favKey(code, service) {
+  return `${code}::${service || ""}`;
+}
+
+function isFav(code, service) {
+  return state.favourites.some((f) => favKey(f.code, f.service) === favKey(code, service));
+}
+
+function toggleFav(code, name, service) {
+  const key = favKey(code, service);
+  const idx = state.favourites.findIndex((f) => favKey(f.code, f.service) === key);
   if (idx >= 0) {
     state.favourites.splice(idx, 1);
-    showToast("Removed from favourites");
+    showToast(service ? `Removed bus ${service} at this stop` : "Removed from favourites");
   } else {
-    state.favourites.push({ code, name });
-    showToast("Added to favourites");
+    state.favourites.push({
+      code,
+      name,
+      service: service || null,
+      addedAt: Date.now(),
+    });
+    showToast(service ? `Saved bus ${service} at this stop` : "Added to favourites");
   }
-  localStorage.setItem("bb_favourites", JSON.stringify(state.favourites));
+  localStorage.setItem(FAV_KEY, JSON.stringify(state.favourites));
   renderFavourites();
   refreshDashboard();
   syncPrefs();
   if (state.currentStop === code) loadArrivals(code);
 }
 
-function renderFavourites() {
+// Starring from a service row, where only the stop code is to hand — the stop
+// name is resolved here rather than threaded through every render path.
+async function toggleFavService(code, service) {
+  const name = await getStopName(code);
+  toggleFav(code, name, service);
+}
+
+// ── Proximity ordering ──
+// Favourites are ordered by how far away they are, so the stop you're standing
+// at is first. The position is cached for a minute and only read on
+// load/refresh — never live. Re-ordering the list under the user's thumb as
+// they walk down the street would be hostile.
+let favPosCache = null;
+let favPosCacheAt = 0;
+const FAV_POS_TTL_MS = 60 * 1000;
+
+async function getSortPosition() {
+  if (favPosCache && Date.now() - favPosCacheAt < FAV_POS_TTL_MS) return favPosCache;
+  if (!navigator.geolocation) return null;
+  // Only use a fix we already have permission for. Sorting a list is not worth
+  // a permission prompt the user didn't ask for.
+  if (navigator.permissions && navigator.permissions.query) {
+    try {
+      const status = await navigator.permissions.query({ name: "geolocation" });
+      if (status.state !== "granted") return null;
+    } catch {
+      return null;
+    }
+  }
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        favPosCache = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+        favPosCacheAt = Date.now();
+        resolve(favPosCache);
+      },
+      () => resolve(null),
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: FAV_POS_TTL_MS }
+    );
+  });
+}
+
+// Nearest first when there's a fix; oldest-saved first otherwise. The
+// fallback is deliberately unlabelled — "sorted by distance" with no distance
+// available would be a lie, and an apology banner for a missing permission is
+// noise.
+async function favouritesInDisplayOrder() {
+  const list = state.favourites.slice();
+  const pos = await getSortPosition();
+  if (!pos) {
+    return list.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
+  }
+  let index;
+  try {
+    index = await getBusStopIndex();
+  } catch {
+    return list.sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
+  }
+  return list
+    .map((f) => {
+      const s = index.get(f.code);
+      return {
+        ...f,
+        dist: s
+          ? haversine(pos.latitude, pos.longitude, s.Latitude, s.Longitude)
+          : Infinity,
+      };
+    })
+    .sort((a, b) => a.dist - b.dist);
+}
+
+function favLabel(f) {
+  return f.service ? `Bus ${f.service}` : "All services";
+}
+
+async function renderFavourites() {
   const list = document.getElementById("favList");
   const empty = document.getElementById("favEmpty");
+  if (!list) return;
   if (state.favourites.length === 0) {
     list.innerHTML = "";
     empty.classList.remove("hidden");
     return;
   }
   empty.classList.add("hidden");
-  list.innerHTML = state.favourites
+  const ordered = await favouritesInDisplayOrder();
+  list.innerHTML = ordered
     .map(
       (f) => `
     <div class="fav-item" onclick="goToStop('${f.code}')">
       <div>
-        <div class="fav-name">${f.name}</div>
-        <div class="fav-detail">${f.code}</div>
+        <div class="fav-name">${escapeHtml(f.name)}${f.service ? `<span class="fav-service">${escapeHtml(f.service)}</span>` : ""}</div>
+        <div class="fav-detail">${f.code} &middot; ${escapeHtml(favLabel(f))}${Number.isFinite(f.dist) ? ` &middot; ${formatDist(f.dist)}` : ""}</div>
       </div>
-      <button class="icon-btn" onclick="event.stopPropagation();toggleFav('${f.code}','${escapeHtml(f.name)}')" title="Remove">&#10005;</button>
+      <button class="icon-btn" onclick="event.stopPropagation();toggleFav('${f.code}','${jsArg(f.name)}',${f.service ? `'${jsArg(f.service)}'` : "null"})" title="Remove" aria-label="Remove favourite">&#10005;</button>
     </div>`
     )
     .join("");
@@ -1500,7 +1750,8 @@ function openDepartureReminderModal() {
 
 function saveDepartureReminder() {
   const reminder = {
-    id: Date.now().toString(36),
+    id: newId(),
+    type: "scheduled",
     stop: document.getElementById("deptStop").value.trim(),
     service: document.getElementById("deptService").value.trim(),
     time: document.getElementById("deptTime").value,
@@ -1553,8 +1804,11 @@ function toggleDeptReminder(id) {
 }
 
 function renderDepartureReminders() {
+  renderOneShotReminders();
   const container = document.getElementById("departureReminders");
-  const visible = state.departureReminders.filter(r => !r.fromMode);
+  const visible = state.departureReminders.filter(
+    (r) => !r.fromMode && r.type !== "oneshot"
+  );
   if (visible.length === 0) {
     container.innerHTML =
       '<p style="color:var(--text2);font-size:13px;">No reminders set.</p>';
@@ -1565,8 +1819,8 @@ function renderDepartureReminders() {
       (r) => `
     <div class="reminder-card">
       <div class="reminder-info">
-        <span class="reminder-value">${r.nickname}</span>
-        <span class="reminder-label">Bus ${r.service} @ stop ${r.stop} &middot; Leave by ${r.time} &middot; Alert ${r.leadMin}min before</span>
+        <span class="reminder-value">${escapeHtml(r.nickname)}</span>
+        <span class="reminder-label">Bus ${escapeHtml(r.service)} @ stop ${escapeHtml(r.stop)} &middot; Leave by ${escapeHtml(r.time)} &middot; Alert ${escapeHtml(r.leadMin)}min before</span>
         <span class="reminder-label reminder-days">&#128197; ${daysSummary(r.days)}</span>
       </div>
       <div style="display:flex;gap:4px;">
@@ -1575,6 +1829,88 @@ function renderDepartureReminders() {
       </div>
     </div>`
     )
+    .join("");
+}
+
+// ── One-shot reminders ──
+// A scheduled reminder answers "every weekday at 08:00, tell me when the 165
+// is close". A one-shot answers "this particular bus, the one arriving at
+// 08:07 — tell me when it's nearly here, then forget about it". It has no
+// time-of-day window and no repeat: it tracks one vehicle and deletes itself.
+let pendingOneShot = null;
+
+async function openOneShotPrompt(stopCode, serviceNo, arrivalIso) {
+  if (!arrivalIso) return;
+  const min = Math.max(0, Math.round((new Date(arrivalIso) - new Date()) / 60000));
+  if (min <= 1) {
+    showToast("That bus is already arriving.");
+    return;
+  }
+  if (state.departureReminders.some(
+    (r) => r.type === "oneshot" && r.stop === stopCode && r.service === serviceNo
+  )) {
+    showToast(`You already have a reminder for bus ${serviceNo} at this stop.`);
+    return;
+  }
+  pendingOneShot = { stop: stopCode, service: serviceNo, targetArrival: arrivalIso };
+  const name = await getStopName(stopCode);
+  document.getElementById("oneShotSummary").innerHTML =
+    `<strong>Bus ${escapeHtml(serviceNo)}</strong> at ${escapeHtml(name)}<br>` +
+    `<span class="oneshot-eta">arriving in about ${min} min</span>`;
+  document.getElementById("oneShotModal").classList.remove("hidden");
+  focusFirstInput("oneShotModal");
+}
+
+function confirmOneShot() {
+  if (!pendingOneShot) return;
+  const { stop, service, targetArrival } = pendingOneShot;
+  state.departureReminders.push({
+    id: newId(),
+    type: "oneshot",
+    stop,
+    service,
+    targetArrival,
+    firedCount: 0,
+    nickname: `Bus ${service} at stop ${stop}`,
+    enabled: true,
+  });
+  localStorage.setItem("bb_deptReminders", JSON.stringify(state.departureReminders));
+  document.getElementById("oneShotModal").classList.add("hidden");
+  pendingOneShot = null;
+  renderDepartureReminders();
+  refreshDashboard();
+  syncPushReminders();
+  showToast(`Tracking bus ${service} — you'll be alerted as it approaches.`);
+}
+
+function cancelOneShot() {
+  pendingOneShot = null;
+  document.getElementById("oneShotModal").classList.add("hidden");
+}
+
+function renderOneShotReminders() {
+  const container = document.getElementById("oneShotReminders");
+  if (!container) return;
+  const list = state.departureReminders.filter((r) => r.type === "oneshot");
+  if (list.length === 0) {
+    container.innerHTML =
+      '<p style="color:var(--text2);font-size:13px;">No one-shot reminders. Tap any arrival time to track that bus.</p>';
+    return;
+  }
+  container.innerHTML = list
+    .map((r) => {
+      const min = r.targetArrival
+        ? Math.max(0, Math.round((new Date(r.targetArrival) - new Date()) / 60000))
+        : null;
+      return `
+    <div class="reminder-card">
+      <div class="reminder-info">
+        <span class="reminder-value">${escapeHtml(r.nickname)}</span>
+        <span class="reminder-label">${min === null ? "Tracking" : `Due in about ${min} min`}${r.firedCount ? ` &middot; alerted ${r.firedCount}&times;` : ""}</span>
+      </div>
+      <button class="icon-btn" onclick="deleteDeptReminder('${r.id}')" title="Cancel" aria-label="Cancel one-shot reminder">&#10005;</button>
+    </div>`;
+    })
     .join("");
 }
 
@@ -1591,14 +1927,24 @@ function startDepartureChecker() {
   deptCheckTimer = setInterval(checkDepartureReminders, 30000);
 }
 
+// This checker was dead code in production: it early-returned on an empty
+// state.apiKey, which was always empty once the key moved to a server env var.
+// Reviving it needs a cooldown, or a reminder in its window would re-fire
+// every 30 seconds. One hour matches the server cron so the two agree about
+// what "already alerted you about this" means.
+const FOREGROUND_COOLDOWN_MS = 60 * 60 * 1000;
+const foregroundLastFired = new Map();
+
 async function checkDepartureReminders() {
-  if (!state.apiKey) return;
   const now = new Date();
   const nowMins = now.getHours() * 60 + now.getMinutes();
 
   const todayDow = now.getDay();
   for (const r of state.departureReminders) {
     if (!r.enabled) continue;
+    // One-shots have no time-of-day window — they track a named vehicle, which
+    // only the server cron can follow once the app is closed.
+    if (r.type === "oneshot" || !r.time) continue;
     if (Array.isArray(r.days) && r.days.length && !r.days.includes(todayDow))
       continue;
     const [h, m] = r.time.split(":").map(Number);
@@ -1607,6 +1953,8 @@ async function checkDepartureReminders() {
     const windowEnd = targetMins + 10;
 
     if (nowMins < windowStart || nowMins > windowEnd) continue;
+    if (Date.now() - (foregroundLastFired.get(r.id) || 0) < FOREGROUND_COOLDOWN_MS)
+      continue;
 
     try {
       const data = await fetchArrivals(r.stop, r.service);
@@ -1614,6 +1962,7 @@ async function checkDepartureReminders() {
       const svc = data.Services[0];
       const next = parseBusArrival(svc.NextBus);
       if (next.min !== null && next.min <= r.leadMin) {
+        foregroundLastFired.set(r.id, Date.now());
         sendNotification(
           `Bus ${r.service} arriving in ${next.min} min!`,
           `${r.nickname} - Time to head to stop ${r.stop}`
@@ -1631,7 +1980,7 @@ function openDropoffModal() {
 
 function saveDropoffAlert() {
   const alert = {
-    id: Date.now().toString(36),
+    id: newId(),
     stopCode: document.getElementById("dropoffStopCode").value.trim(),
     radius: parseInt(document.getElementById("dropoffRadius").value) || 300,
     nickname:
@@ -1652,6 +2001,7 @@ function saveDropoffAlert() {
   renderDropoffAlerts();
   refreshDashboard();
   resolveDropoffCoords(alert);
+  syncPrefs();
   showToast("Drop-off alert saved");
 }
 
@@ -1666,6 +2016,7 @@ async function resolveDropoffCoords(alert) {
         "bb_dropoffAlerts",
         JSON.stringify(state.dropoffAlerts)
       );
+      syncPrefs();
     }
   } catch {}
 }
@@ -1678,6 +2029,7 @@ function deleteDropoffAlert(id) {
   );
   renderDropoffAlerts();
   refreshDashboard();
+  syncPrefs();
   if (activeDropoff && activeDropoff.id === id) stopDropoff();
 }
 
@@ -1694,8 +2046,8 @@ function renderDropoffAlerts() {
       (a) => `
     <div class="reminder-card">
       <div class="reminder-info">
-        <span class="reminder-value">${a.nickname}</span>
-        <span class="reminder-label">Stop ${a.stopCode} &middot; ${a.radius}m radius ${a.lat ? "&#9989;" : "&#9888; resolving coords..."}</span>
+        <span class="reminder-value">${escapeHtml(a.nickname)}</span>
+        <span class="reminder-label">Stop ${escapeHtml(a.stopCode)} &middot; ${escapeHtml(a.radius)}m radius ${a.lat ? "&#9989;" : "&#9888; resolving coords..."}</span>
       </div>
       <div style="display:flex;gap:4px;">
         <button class="btn btn-sm ${activeDropoff && activeDropoff.id === a.id ? "btn-danger" : ""}" onclick="${activeDropoff && activeDropoff.id === a.id ? "stopDropoff()" : `startDropoff('${a.id}')`}">
@@ -1708,8 +2060,183 @@ function renderDropoffAlerts() {
     .join("");
 }
 
-function startDropoff(alertId) {
-  const alert = state.dropoffAlerts.find((a) => a.id === alertId);
+// ── Server-tracked rides ──
+//
+// The foreground watcher below can only run with the app open and the screen
+// awake. That is not the situation this feature exists for — you are on a bus,
+// phone in pocket, screen locked. And a PWA cannot fix it from the handset
+// side: navigator.geolocation doesn't exist in ServiceWorkerGlobalScope, and
+// Chrome cancelled the Geofencing API, so there is no way to watch your own
+// position in the background.
+//
+// So watch the bus instead. LTA's v3/BusArrival carries
+// NextBus.Latitude/Longitude — the live position of the vehicle — which
+// parseBusArrival used to throw away. The server polls that once a minute and
+// pushes when the bus reaches the stop before yours. It works with the app
+// closed, and a vehicle's own transponder is a better fix than a phone's.
+
+// Alerting when you reach your stop is too late to stand up and get to the
+// door, so the alert is anchored to the stop before it. The route sequence is
+// already loaded client-side, which means it can be resolved here once, at
+// creation time, instead of the server crawling BusRoutes on every tick.
+async function resolvePrevStop(serviceNo, destStopCode) {
+  const dirs = await getRouteDirections(serviceNo);
+  for (const d of dirs) {
+    const stops = await getRouteStops(serviceNo, d);
+    const i = stops.findIndex((s) => s.code === destStopCode);
+    if (i > 0) return { prev: stops[i - 1], dest: stops[i] };
+    if (i === 0) return { prev: null, dest: stops[0] };
+  }
+  return null;
+}
+
+async function loadRides() {
+  try {
+    const res = await authFetch("/api/rides");
+    if (!res.ok) return;
+    const { rides } = await res.json();
+    state.rides = Array.isArray(rides) ? rides : [];
+    renderDashRides();
+    renderRides();
+  } catch (e) {
+    console.error("Ride load failed:", e);
+  }
+}
+
+async function startServerTrackedRide(serviceNo, destStopCode) {
+  let resolved;
+  try {
+    resolved = await resolvePrevStop(serviceNo, destStopCode);
+  } catch {
+    showToast("Couldn't load that route.");
+    return null;
+  }
+  if (!resolved) {
+    showToast(`Bus ${serviceNo} doesn't stop there.`);
+    return null;
+  }
+  if (!resolved.prev) {
+    showToast("That's the first stop on the route — there's no earlier stop to warn you at.");
+    return null;
+  }
+  if (state.rides.some((r) => r.service === serviceNo && r.destStop === destStopCode)) {
+    showToast("You're already tracking that ride.");
+    return null;
+  }
+
+  const ride = {
+    id: newId(),
+    service: serviceNo,
+    destStop: destStopCode,
+    destName: resolved.dest.stop.Description,
+    destLat: resolved.dest.stop.Latitude,
+    destLng: resolved.dest.stop.Longitude,
+    prevStop: resolved.prev.code,
+    prevName: resolved.prev.stop.Description,
+    prevLat: resolved.prev.stop.Latitude,
+    prevLng: resolved.prev.stop.Longitude,
+    startedAt: new Date().toISOString(),
+  };
+
+  try {
+    const res = await authFetch("/api/rides", {
+      method: "POST",
+      body: JSON.stringify(ride),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.status);
+  } catch (e) {
+    showToast("Couldn't start tracking: " + e.message);
+    return null;
+  }
+
+  // Several rides can run at once — a two-bus journey arms both legs. Only the
+  // foreground watcher stays single, because there's only one phone to follow.
+  state.rides.push(ride);
+  renderDashRides();
+  renderRides();
+  return ride;
+}
+
+async function endServerTrackedRide(id) {
+  state.rides = state.rides.filter((r) => r.id !== id);
+  renderDashRides();
+  renderRides();
+  if (activeDropoff && activeDropoff.id === id) stopDropoff();
+  try {
+    await authFetch(`/api/rides?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+  } catch (e) {
+    console.error("Ride end failed:", e);
+  }
+}
+
+// Called from a service's stop list: "this is where I'm getting off".
+async function setRideDestination(destStopCode) {
+  if (!routeStopsService) return;
+  const ride = await startServerTrackedRide(routeStopsService, destStopCode);
+  if (!ride) return;
+  showToast(`Tracking bus ${ride.service} — you'll be alerted at ${ride.prevName}.`);
+  await renderRouteStopsList();
+}
+
+function rideCardHtml(r, compact) {
+  const watching = activeDropoff && activeDropoff.id === r.id;
+  return `
+    <div class="card dash-dropoff-card ${watching ? "dash-dropoff-active" : ""}">
+      <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+        ${watching ? '<div class="pulse"></div>' : ""}
+        <div style="min-width:0;">
+          <div class="reminder-value">Bus ${escapeHtml(r.service)} → ${escapeHtml(r.destName || r.destStop)}</div>
+          <div class="reminder-label">Alert at ${escapeHtml(r.prevName || r.prevStop)} &middot; tracked on the server${watching ? " &middot; also watching here" : ""}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:4px;align-items:center;flex:0 0 auto;">
+        ${compact ? "" : `<button class="btn btn-sm ${watching ? "btn-danger" : "btn-ghost"}" onclick="${watching ? "stopDropoff()" : `watchRideInForeground('${r.id}')`}">${watching ? "Stop" : "Watch"}</button>`}
+        <button class="icon-btn" onclick="endServerTrackedRide('${r.id}')" title="End ride" aria-label="End ride">&#10005;</button>
+      </div>
+    </div>`;
+}
+
+function renderRides() {
+  const container = document.getElementById("rideList");
+  if (!container) return;
+  if (state.rides.length === 0) {
+    container.innerHTML =
+      '<p style="color:var(--text2);font-size:13px;">No rides in progress. Open a bus route and tap &ldquo;Set as my stop&rdquo; on the stop you\'re getting off at.</p>';
+    return;
+  }
+  container.innerHTML = state.rides.map((r) => rideCardHtml(r, false)).join("");
+}
+
+function renderDashRides() {
+  const container = document.getElementById("dashRides");
+  const section = document.getElementById("dashRidesSection");
+  if (!container || !section) return;
+  section.classList.toggle("hidden", state.rides.length === 0);
+  container.innerHTML = state.rides.map((r) => rideCardHtml(r, true)).join("");
+}
+
+// Optional live distance readout while the app happens to be open. The push
+// is the real mechanism; this just shows progress when you're watching.
+function watchRideInForeground(rideId) {
+  const ride = state.rides.find((r) => r.id === rideId);
+  if (!ride) return;
+  startDropoff({
+    id: ride.id,
+    nickname: `Bus ${ride.service} → ${ride.destName || ride.destStop}`,
+    stopCode: ride.prevStop,
+    radius: 250,
+    lat: ride.prevLat,
+    lng: ride.prevLng,
+  });
+}
+
+// `alertOrId` is a drop-off alert id, or a ready-made target object (used by
+// rides, which geofence the stop *before* the destination).
+function startDropoff(alertOrId) {
+  const alert =
+    typeof alertOrId === "string"
+      ? state.dropoffAlerts.find((a) => a.id === alertOrId)
+      : alertOrId;
   if (!alert) return;
   if (!alert.lat || !alert.lng) {
     showToast("Coordinates not resolved yet. Try again in a moment.");
@@ -1751,6 +2278,7 @@ function startDropoff(alertId) {
   );
 
   renderDropoffAlerts();
+  renderRides();
   refreshDashboard();
 }
 
@@ -1763,6 +2291,7 @@ function stopDropoff() {
   releaseWakeLock();
   document.getElementById("dropoffBanner").classList.add("hidden");
   renderDropoffAlerts();
+  renderRides();
   refreshDashboard();
 }
 
@@ -1809,9 +2338,8 @@ function haversine(lat1, lon1, lat2, lon2) {
 async function postModes(modes) {
   localStorage.setItem("bb_modes", JSON.stringify(modes));
   try {
-    await fetch("/api/modes", {
+    await authFetch("/api/modes", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(modes),
     });
   } catch {}
@@ -1819,7 +2347,7 @@ async function postModes(modes) {
 
 async function loadModes() {
   try {
-    const remote = await fetch("/api/modes").then(r => r.json());
+    const remote = await authFetch("/api/modes").then(r => r.json());
     if (Array.isArray(remote)) {
       state.modes = remote;
       localStorage.setItem("bb_modes", JSON.stringify(remote));
@@ -1830,34 +2358,47 @@ async function loadModes() {
 
 function openModeModal() {
   document.getElementById("modeModal").classList.remove("hidden");
+  renderDayPicker("modeRepeatDays", [1, 2, 3, 4, 5]);
+  document.getElementById("modeRepeatOn").checked = false;
+  toggleModeRepeat();
   focusFirstInput("modeModal");
+}
+
+// A mode is on-demand by default: you activate it when you're actually going.
+// The old fixed "leave by" time and lead minutes forced every mode to be a
+// daily alarm, which is wrong for the trips people actually save — the ones
+// they take sometimes. Repeating is now opt-in.
+function toggleModeRepeat() {
+  const on = document.getElementById("modeRepeatOn").checked;
+  document.getElementById("modeRepeatFields").classList.toggle("hidden", !on);
 }
 
 async function saveMode() {
   const name = document.getElementById("modeNameInput").value.trim();
   const departureStop = document.getElementById("modeDeptStop").value.trim();
   const service = document.getElementById("modeDeptService").value.trim();
-  const leaveTime = document.getElementById("modeLeaveTime").value;
-  const leadMin = parseInt(document.getElementById("modeLeadMin").value) || 5;
   const dropoffStop = document.getElementById("modeDropoffStop").value.trim();
-  const dropoffRadius = parseInt(document.getElementById("modeDropoffRadius").value) || 300;
+  const repeatOn = document.getElementById("modeRepeatOn").checked;
+  const repeatTime = document.getElementById("modeRepeatTime").value;
 
   if (!name || !departureStop || !service || !dropoffStop) {
     showToast("Please fill in all required fields");
     return;
   }
+  if (repeatOn && !repeatTime) {
+    showToast("Pick a time for the repeat schedule");
+    return;
+  }
 
   const mode = {
-    id: Date.now().toString(36),
+    id: newId(),
     name,
     departureStop,
     service,
-    leaveTime,
-    leadMin,
     dropoffStop,
-    dropoffRadius,
-    dropoffLat: null,
-    dropoffLng: null,
+    repeat: repeatOn
+      ? { days: readDayPicker("modeRepeatDays"), time: repeatTime }
+      : null,
     active: false,
     createdVia: "app",
   };
@@ -1866,108 +2407,114 @@ async function saveMode() {
   await postModes(state.modes);
   document.getElementById("modeModal").classList.add("hidden");
   renderModes();
-  resolveModDropoffCoords(mode);
+  refreshDashboard();
   showToast("Journey mode saved");
 }
 
-async function resolveModDropoffCoords(mode) {
-  try {
-    const stops = await loadBusStops();
-    const stop = stops.find(s => s.BusStopCode === mode.dropoffStop);
-    if (stop) {
-      mode.dropoffLat = stop.Latitude;
-      mode.dropoffLng = stop.Longitude;
-      await postModes(state.modes);
-      renderModes();
-    }
-  } catch {}
+function modeRepeatSummary(m) {
+  if (!m.repeat || !m.repeat.time) return "On demand";
+  return `Repeats ${daysSummary(m.repeat.days)} at ${m.repeat.time}`;
+}
+
+function modeCardHtml(m, compact) {
+  return `
+    <div class="reminder-card${m.active ? " reminder-card--active" : ""}">
+      <div class="reminder-info">
+        <span class="reminder-value">${escapeHtml(m.name)}</span>
+        <span class="reminder-label">&#128652; Bus ${escapeHtml(m.service)} from stop ${escapeHtml(m.departureStop)} &rarr; stop ${escapeHtml(m.dropoffStop)}</span>
+        <span class="reminder-label">&#128197; ${escapeHtml(modeRepeatSummary(m))}</span>
+      </div>
+      <div style="display:flex;gap:4px;align-items:center;flex:0 0 auto;">
+        <button class="btn btn-sm${m.active ? " btn-danger" : ""}" onclick="${m.active ? `deactivateMode('${m.id}')` : `activateMode('${m.id}')`}">
+          ${m.active ? "Stop" : "Start"}
+        </button>
+        ${compact ? "" : `<button class="icon-btn" onclick="deleteMode('${m.id}')" title="Delete" aria-label="Delete mode">&#10005;</button>`}
+      </div>
+    </div>`;
 }
 
 function renderModes() {
   const container = document.getElementById("modesContainer");
   if (!container) return;
   if (state.modes.length === 0) {
-    container.innerHTML = '<p style="color:var(--text2);font-size:13px;">No modes saved yet. Add one to combine your bus reminder and drop-off alert in one tap.</p>';
+    container.innerHTML = '<p style="color:var(--text2);font-size:13px;">No modes saved yet. Add one to arm your departure reminder and drop-off alert in a single tap.</p>';
     return;
   }
-  container.innerHTML = state.modes.map(m => `
-    <div class="reminder-card${m.active ? " reminder-card--active" : ""}">
-      <div class="reminder-info">
-        <span class="reminder-value">${m.name}</span>
-        <span class="reminder-label">&#128652; Bus ${m.service} from stop ${m.departureStop} &middot; Leave by ${m.leaveTime} &middot; ${m.leadMin}min alert</span>
-        <span class="reminder-label">&#128205; Drop-off stop ${m.dropoffStop} &middot; ${m.dropoffRadius}m ${m.dropoffLat ? "&#9989;" : "&#9888; resolving..."}</span>
-      </div>
-      <div style="display:flex;gap:4px;align-items:center;">
-        <button class="btn btn-sm${m.active ? " btn-danger" : ""}" onclick="${m.active ? `deactivateMode('${m.id}')` : `activateMode('${m.id}')`}">
-          ${m.active ? "Deactivate" : "Activate"}
-        </button>
-        <button class="icon-btn" onclick="deleteMode('${m.id}')" title="Delete">&#10005;</button>
-      </div>
-    </div>`).join("");
+  container.innerHTML = state.modes.map((m) => modeCardHtml(m, false)).join("");
+}
+
+// Modes are the thing people open the app to use, so they belong on Home, not
+// buried two taps deep on the Reminders tab.
+function renderDashModes() {
+  const container = document.getElementById("dashModes");
+  const empty = document.getElementById("dashModesEmpty");
+  if (!container) return;
+  if (state.modes.length === 0) {
+    container.innerHTML = "";
+    if (empty) empty.classList.remove("hidden");
+    return;
+  }
+  if (empty) empty.classList.add("hidden");
+  container.innerHTML = state.modes.map((m) => modeCardHtml(m, true)).join("");
 }
 
 async function activateMode(id) {
-  const prev = state.modes.find(m => m.active);
-  if (prev && prev.id !== id) await deactivateMode(prev.id);
-
   const mode = state.modes.find(m => m.id === id);
   if (!mode) return;
-  if (!mode.dropoffLat || !mode.dropoffLng) {
-    showToast("Coordinates not resolved yet. Try again in a moment.");
-    return;
-  }
 
-  const reminder = {
-    id: `mode_${mode.id}`,
-    stop: mode.departureStop,
-    service: mode.service,
-    time: mode.leaveTime,
-    leadMin: mode.leadMin,
-    nickname: mode.name,
-    enabled: true,
-    fromMode: mode.id,
-  };
+  // Arming the drop-off is server-side now, so several modes can be running at
+  // once — the old "one active mode" rule existed only because the foreground
+  // GPS watcher could follow one destination at a time.
+  const ride = await startServerTrackedRide(mode.service, mode.dropoffStop);
+  if (!ride) return;
+
+  // Only a repeating mode gets a scheduled reminder. An on-demand one is
+  // already happening — you just started it — so a "time to leave" alert for
+  // it would be nonsense.
+  const prevReminder = state.departureReminders.find((r) => r.fromMode === mode.id);
   state.departureReminders = state.departureReminders.filter(r => r.fromMode !== mode.id);
-  state.departureReminders.push(reminder);
+  if (mode.repeat && mode.repeat.time) {
+    state.departureReminders.push({
+      // Reuse the existing derived row's id so its firing history survives.
+      id: prevReminder?.id || newId(),
+      type: "scheduled",
+      stop: mode.departureStop,
+      service: mode.service,
+      time: mode.repeat.time,
+      days: mode.repeat.days || [],
+      leadMin: state.reminderLeadMin,
+      nickname: mode.name,
+      enabled: true,
+      fromMode: mode.id,
+    });
+  }
   localStorage.setItem("bb_deptReminders", JSON.stringify(state.departureReminders));
 
-  const dropoff = {
-    id: `mode_${mode.id}_drop`,
-    stopCode: mode.dropoffStop,
-    radius: mode.dropoffRadius,
-    nickname: mode.name,
-    lat: mode.dropoffLat,
-    lng: mode.dropoffLng,
-    fromMode: mode.id,
-  };
-  state.dropoffAlerts = state.dropoffAlerts.filter(a => a.fromMode !== mode.id);
-  state.dropoffAlerts.push(dropoff);
-  localStorage.setItem("bb_dropoffAlerts", JSON.stringify(state.dropoffAlerts));
-
   mode.active = true;
+  mode.rideId = ride.id;
   await postModes(state.modes);
   syncPushReminders();
-  startDropoff(`mode_${mode.id}_drop`);
   renderModes();
   renderDepartureReminders();
+  refreshDashboard();
+  showToast(`${mode.name} started — alerting at ${ride.prevName}.`);
 }
 
 async function deactivateMode(id) {
   const mode = state.modes.find(m => m.id === id);
   if (!mode) return;
 
-  if (activeDropoff && activeDropoff.id === `mode_${mode.id}_drop`) stopDropoff();
+  if (mode.rideId) await endServerTrackedRide(mode.rideId);
   state.departureReminders = state.departureReminders.filter(r => r.fromMode !== mode.id);
   localStorage.setItem("bb_deptReminders", JSON.stringify(state.departureReminders));
-  state.dropoffAlerts = state.dropoffAlerts.filter(a => a.fromMode !== mode.id);
-  localStorage.setItem("bb_dropoffAlerts", JSON.stringify(state.dropoffAlerts));
 
   mode.active = false;
+  mode.rideId = null;
   await postModes(state.modes);
   syncPushReminders();
   renderModes();
   renderDepartureReminders();
-  renderDropoffAlerts();
+  refreshDashboard();
 }
 
 async function deleteMode(id) {
@@ -1976,12 +2523,15 @@ async function deleteMode(id) {
   state.modes = state.modes.filter(m => m.id !== id);
   await postModes(state.modes);
   renderModes();
+  refreshDashboard();
 }
 
 // ── Dashboard ──
 function refreshDashboard() {
   renderPlaces();
   renderDashFavourites();
+  renderDashModes();
+  renderDashRides();
   renderDashReminders();
   renderDashDropoffs();
   refreshDashNearby();
@@ -2076,7 +2626,27 @@ function renderDashNearby(nearest) {
     .join("");
 }
 
-function renderDashFavourites() {
+// One card per stop, even when several services at that stop are starred —
+// two cards for the same stop would fetch the same arrivals twice and read as
+// a duplicate. `services` is the set of starred services for that stop, or
+// empty when the whole stop is starred, in which case everything shows.
+function groupFavouritesByStop(ordered) {
+  const byStop = new Map();
+  for (const f of ordered) {
+    let entry = byStop.get(f.code);
+    if (!entry) {
+      entry = { code: f.code, name: f.name, dist: f.dist, services: new Set(), all: false };
+      byStop.set(f.code, entry);
+    }
+    if (f.service) entry.services.add(f.service);
+    else entry.all = true;
+  }
+  return [...byStop.values()];
+}
+
+let dashFavServiceFilter = new Map();
+
+async function renderDashFavourites() {
   const container = document.getElementById("dashFavStops");
   const empty = document.getElementById("dashFavEmpty");
   if (!container) return;
@@ -2084,20 +2654,31 @@ function renderDashFavourites() {
   if (state.favourites.length === 0) {
     container.innerHTML = "";
     empty.classList.remove("hidden");
+    dashFavServiceFilter = new Map();
     return;
   }
   empty.classList.add("hidden");
 
-  container.innerHTML = state.favourites.map((fav, i) => `
-    <div class="card dash-stop-card" id="dash-stop-${fav.code}" data-stop="${fav.code}">
+  const groups = groupFavouritesByStop(await favouritesInDisplayOrder());
+  dashFavServiceFilter = new Map(
+    groups.map((g) => [g.code, g.all ? null : [...g.services]])
+  );
+
+  container.innerHTML = groups.map((g, i) => {
+    const svcLabel = g.all
+      ? ""
+      : `<div class="dash-stop-services">${[...g.services].map(escapeHtml).join(" · ")}</div>`;
+    return `
+    <div class="card dash-stop-card" id="dash-stop-${g.code}" data-stop="${g.code}">
       <div class="dash-stop-header">
         <div>
-          <span class="dash-stop-name">${fav.name}</span>
-          <span class="bus-stop-code">${fav.code}</span>
+          <span class="dash-stop-name">${escapeHtml(g.name)}</span>
+          <span class="bus-stop-code">${g.code}${Number.isFinite(g.dist) ? ` &middot; ${formatDist(g.dist)}` : ""}</span>
+          ${svcLabel}
         </div>
-        <button class="btn btn-ghost btn-sm" onclick="dashLoadStop('${fav.code}')">Load</button>
+        <button class="btn btn-ghost btn-sm" onclick="dashLoadStop('${g.code}')">Load</button>
       </div>
-      <div class="dash-stop-arrivals" id="dash-arrivals-${fav.code}">
+      <div class="dash-stop-arrivals" id="dash-arrivals-${g.code}">
         ${i < 3 ? `<div style="padding:4px 0;">${[0,1].map(() => `
           <div class="skeleton-row">
             <div class="skeleton skeleton-svc" style="height:18px;"></div>
@@ -2107,10 +2688,10 @@ function renderDashFavourites() {
             </div>
           </div>`).join("")}</div>` : '<div class="dash-tap-load">Tap Load to see arrivals</div>'}
       </div>
-    </div>
-  `).join("");
+    </div>`;
+  }).join("");
 
-  dashFetchQueue = state.favourites.slice(0, 3).map(f => f.code);
+  dashFetchQueue = groups.slice(0, 3).map(g => g.code);
   processDashFetchQueue();
 }
 
@@ -2177,10 +2758,19 @@ async function renderDashArrivals(stopCode, data) {
     return;
   }
 
-  const services = data.Services.map(svc => {
-    const times = [svc.NextBus, svc.NextBus2, svc.NextBus3].map(parseBusArrival);
-    return { no: svc.ServiceNo, times };
-  });
+  // When only specific services at this stop are starred, show only those —
+  // that's the whole point of a service-level favourite.
+  const filter = dashFavServiceFilter.get(stopCode);
+  const services = data.Services
+    .filter(svc => !filter || filter.includes(svc.ServiceNo))
+    .map(svc => {
+      const times = [svc.NextBus, svc.NextBus2, svc.NextBus3].map(parseBusArrival);
+      return { no: svc.ServiceNo, times };
+    });
+  if (services.length === 0) {
+    container.innerHTML = '<div class="dash-no-service">No arrivals for your saved buses right now</div>';
+    return;
+  }
   services.sort((a, b) => {
     const aMin = Math.min(...a.times.map(t => t.min ?? 999));
     const bMin = Math.min(...b.times.map(t => t.min ?? 999));
@@ -2215,7 +2805,7 @@ function stopDashAutoRefresh() {
 
 function dashRefreshAll() {
   dashArrivalCache = {};
-  dashFetchQueue = state.favourites.map(f => f.code);
+  dashFetchQueue = [...new Set(state.favourites.map(f => f.code))];
   processDashFetchQueue();
   showToast("Refreshing all stops...");
 }
@@ -2225,24 +2815,25 @@ function renderDashReminders() {
   const empty = document.getElementById("dashDeptEmpty");
   if (!container) return;
 
-  if (state.departureReminders.length === 0) {
+  const scheduled = state.departureReminders.filter((r) => r.type !== "oneshot");
+  if (scheduled.length === 0) {
     container.innerHTML = "";
     empty.classList.remove("hidden");
     return;
   }
   empty.classList.add("hidden");
 
-  container.innerHTML = state.departureReminders.map(r => {
+  container.innerHTML = scheduled.map(r => {
     const statusCls = r.enabled ? "active" : "idle";
     const statusText = r.enabled ? "Active" : "Off";
     const nextTrigger = r.enabled ? computeNextTrigger(r) : "";
     return `
       <div class="card dash-reminder-card ${r.enabled ? '' : 'dash-disabled'}">
         <div class="dash-reminder-top">
-          <span class="reminder-value">${r.nickname}</span>
+          <span class="reminder-value">${escapeHtml(r.nickname)}</span>
           <span class="reminder-status ${statusCls}">${statusText}</span>
         </div>
-        <div class="reminder-label">Bus ${r.service} @ stop ${r.stop} &middot; Leave by ${r.time} &middot; Alert ${r.leadMin}min before</div>
+        <div class="reminder-label">Bus ${escapeHtml(r.service)} @ stop ${escapeHtml(r.stop)} &middot; Leave by ${escapeHtml(r.time)} &middot; Alert ${escapeHtml(r.leadMin)}min before</div>
         ${nextTrigger ? `<div class="dash-next-trigger">${nextTrigger}</div>` : ""}
       </div>`;
   }).join("");
@@ -2278,8 +2869,8 @@ function renderDashDropoffs() {
         <div style="display:flex;align-items:center;gap:8px;">
           ${isActive ? '<div class="pulse"></div>' : ''}
           <div>
-            <div class="reminder-value">${a.nickname}</div>
-            <div class="reminder-label">Stop ${a.stopCode} &middot; ${a.radius}m radius${isActive ? ' &middot; Tracking' : ''}${a.lat ? '' : ' &middot; &#9888; resolving...'}</div>
+            <div class="reminder-value">${escapeHtml(a.nickname)}</div>
+            <div class="reminder-label">Stop ${escapeHtml(a.stopCode)} &middot; ${escapeHtml(a.radius)}m radius${isActive ? ' &middot; Tracking' : ''}${a.lat ? '' : ' &middot; &#9888; resolving...'}</div>
           </div>
         </div>
         <button class="btn btn-sm ${isActive ? 'btn-danger' : 'btn-ghost'}"
@@ -2318,15 +2909,15 @@ async function loadMapStops() {
     const stops = await loadBusStops();
     stops.forEach(s => {
       if (!s.Latitude || !s.Longitude) return;
-      const isFav = state.favourites.some(f => f.code === s.BusStopCode);
-      const marker = L.marker([s.Latitude, s.Longitude], { icon: makeBusStopIcon(isFav) });
+      const starred = isFav(s.BusStopCode, null);
+      const marker = L.marker([s.Latitude, s.Longitude], { icon: makeBusStopIcon(starred) });
       marker.bindPopup(`
-        <div class="popup-name">${s.Description}</div>
-        <div class="popup-detail">${s.BusStopCode} &middot; ${s.RoadName}</div>
+        <div class="popup-name">${escapeHtml(s.Description)}</div>
+        <div class="popup-detail">${s.BusStopCode} &middot; ${escapeHtml(s.RoadName)}</div>
         <div class="popup-arrivals" id="popup-arr-${s.BusStopCode}"><div class="popup-arr-loading">Loading arrivals…</div></div>
         <div class="popup-actions">
           <button class="btn btn-sm" onclick="goToStop('${s.BusStopCode}')">View Arrivals</button>
-          <button class="icon-btn ${isFav ? 'active' : ''}" onclick="toggleFav('${s.BusStopCode}','${escapeHtml(s.Description)}')" title="Favourite">&#9733;</button>
+          <button class="icon-btn ${starred ? 'active' : ''}" onclick="toggleFav('${s.BusStopCode}','${jsArg(s.Description)}',null)" title="Favourite">&#9733;</button>
         </div>
       `);
       marker.on("popupopen", () => loadPopupArrivals(s.BusStopCode));
@@ -2358,7 +2949,7 @@ async function loadPopupArrivals(stopCode) {
         const cls = badgeClass(s.next.min);
         const arr = s.next.arrival ? ` data-arrival="${s.next.arrival}"` : "";
         return `<div class="popup-arr-row">
-          <span class="popup-arr-svc">${s.no}</span>
+          <span class="popup-arr-svc">${escapeHtml(s.no)}</span>
           <span class="arrival-badge ${cls}"${arr}><span class="time-text">${badgeLabel(s.next.min)}</span></span>
         </div>`;
       })
@@ -2553,15 +3144,32 @@ async function renderRouteStopsList() {
       if (anchorIndex !== -1 && i < anchorIndex) cls = "passed";
       else if (i === anchorIndex) cls = "current";
       const here = i === anchorIndex ? '<span class="route-here-badge">Here</span>' : "";
+      // The star here saves this service *at this stop* — the row already
+      // carries both halves of the identity, which is exactly what a
+      // service-level favourite needs.
+      const starred = isFav(s.code, routeStopsService);
+      const tracking = state.rides.find(
+        (r) => r.service === routeStopsService && r.destStop === s.code
+      )?.id;
       return `
-        <button class="route-stop-item ${cls}" onclick="openRouteStopDetail('${s.code}')" aria-label="${escapeHtml(s.stop.Description)}, view stop details">
-          <span class="route-stop-rail"><span class="route-stop-dot"></span></span>
-          <span class="route-stop-body">
-            <span class="route-stop-name">${escapeHtml(s.stop.Description)}${here}${stopTagsHtml(tags[i])}</span>
-            <span class="route-stop-meta">Stop ${s.seq} · ${s.code}${s.stop.RoadName ? " · " + escapeHtml(s.stop.RoadName) : ""}</span>
-          </span>
-          <span class="route-stop-chevron" aria-hidden="true">›</span>
-        </button>`;
+        <div class="route-stop-item ${cls}">
+          <button class="route-stop-main" onclick="openRouteStopDetail('${s.code}')" aria-label="${escapeHtml(s.stop.Description)}, view stop details">
+            <span class="route-stop-rail"><span class="route-stop-dot"></span></span>
+            <span class="route-stop-body">
+              <span class="route-stop-name">${escapeHtml(s.stop.Description)}${here}${stopTagsHtml(tags[i])}</span>
+              <span class="route-stop-meta">Stop ${s.seq} · ${s.code}${s.stop.RoadName ? " · " + escapeHtml(s.stop.RoadName) : ""}</span>
+            </span>
+            <span class="route-stop-chevron" aria-hidden="true">›</span>
+          </button>
+          <button class="icon-btn route-stop-fav ${starred ? "active" : ""}"
+                  onclick="toggleFavService('${s.code}','${jsArg(routeStopsService)}').then(renderRouteStopsList)"
+                  title="Favourite bus ${escapeHtml(routeStopsService)} here"
+                  aria-label="Favourite bus ${escapeHtml(routeStopsService)} at ${escapeHtml(s.stop.Description)}">&#9733;</button>
+          <button class="icon-btn route-stop-fav ${tracking ? "active" : ""}"
+                  onclick="${tracking ? `endServerTrackedRide('${tracking}').then(renderRouteStopsList)` : `setRideDestination('${s.code}')`}"
+                  title="${tracking ? "Stop tracking this ride" : "Set as my stop — alert me one stop early"}"
+                  aria-label="${tracking ? "Stop tracking" : "Set as my stop"} for ${escapeHtml(s.stop.Description)}">&#128205;</button>
+        </div>`;
     })
     .join("");
 
@@ -2742,7 +3350,9 @@ async function findNearbyStops(scope = "arrivals") {
 // permission, surface nearby stops as top suggestions without prompting.
 function handleSearchFocus(scope = "arrivals") {
   const cfg = SEARCH_SCOPES[scope];
-  if (!document.getElementById(cfg.input).value.trim()) maybeSuggestNearby(scope);
+  if (document.getElementById(cfg.input).value.trim()) return;
+  renderRecentSearches(scope);
+  maybeSuggestNearby(scope);
 }
 
 async function maybeSuggestNearby(scope = "arrivals") {
@@ -2764,7 +3374,6 @@ function formatDist(m) {
 async function openSettings() {
   const langSel = document.getElementById("langSelect");
   if (langSel && typeof currentLang !== "undefined") langSel.value = currentLang;
-  document.getElementById("apiKeyInput").value = state.apiKey;
   document.getElementById("refreshInterval").value = state.refreshSec;
   document.getElementById("reminderLead").value = state.reminderLeadMin;
   const soundName = localStorage.getItem('bb_alert_sound_name');
@@ -2786,6 +3395,155 @@ async function openSettings() {
   } else {
     infoEl.textContent = "Not cached yet";
   }
+  refreshServerKeyStatus();
+  refreshTelegramStatus();
+  renderAlertLines();
+}
+
+// The LTA key is a server env var, so there is nothing to type here any more —
+// but "is it actually configured?" is still worth answering, because every
+// arrival in the app fails silently without it.
+async function refreshServerKeyStatus() {
+  const el = document.getElementById("ltaKeyStatus");
+  if (!el) return;
+  try {
+    const { hasKey } = await fetch("/api/check-key").then((r) => r.json());
+    el.textContent = hasKey
+      ? "✅ LTA DataMall key configured on the server."
+      : "❌ LTA_API_KEY isn't set on the server — arrivals won't load. See SETUP.md.";
+  } catch {
+    el.textContent = "⚠️ Couldn't check the server's LTA key.";
+  }
+}
+
+// ── Rail disruption alerts ──
+// data/mrt.json uses its own line ids; LTA's TrainServiceAlerts feed uses a
+// slightly different set. Mapping between them here keeps the discrepancy in
+// one place instead of leaking into both the UI and the cron.
+const ALERT_LINE_CODES = {
+  NSL: "NSL",
+  EWL: "EWL",
+  NEL: "NEL",
+  CCL: "CCL",
+  DTL: "DTL",
+  TEL: "TEL",
+  BPLRT: "BPL",
+  SKLRT: "SLRT",
+  PGLRT: "PLRT",
+};
+
+// Default subscription: the lines you'd actually be standing on. Derived from
+// the rail stations near your favourite stops, so a new user gets something
+// useful without configuring anything.
+async function defaultAlertLines() {
+  const lines = new Set();
+  try {
+    const index = await getBusStopIndex();
+    for (const f of state.favourites) {
+      const stop = index.get(f.code);
+      if (!stop) continue;
+      const near = await mrtStationsNear(stop.Latitude, stop.Longitude, 400);
+      for (const n of near) {
+        const code = ALERT_LINE_CODES[n.station.line];
+        if (code) lines.add(code);
+      }
+    }
+  } catch {
+    // Rail data or stop index unavailable — fall through to "all lines".
+  }
+  return [...lines];
+}
+
+// Runs at startup as well as when Settings opens: a user who never opens
+// Settings should still get alerts for the lines they travel on, rather than
+// silently ending up on the "follow everything" fallback.
+async function ensureAlertLines() {
+  if (Array.isArray(state.alertLines)) return;
+  const derived = await defaultAlertLines();
+  // Nothing near rail yet → follow everything rather than nothing.
+  state.alertLines = derived.length > 0 ? derived : Object.values(ALERT_LINE_CODES);
+  localStorage.setItem("bb_alertLines", JSON.stringify(state.alertLines));
+  syncPrefs();
+}
+
+async function renderAlertLines() {
+  const container = document.getElementById("alertLinesList");
+  if (!container) return;
+  let data;
+  try {
+    data = await loadMrtData();
+    await ensureAlertLines();
+  } catch {
+    container.innerHTML =
+      '<p style="font-size:12px;color:var(--text2);">Couldn\'t load the rail network.</p>';
+    return;
+  }
+
+  const seen = new Set();
+  container.innerHTML = data.lines
+    .map((l) => {
+      const code = ALERT_LINE_CODES[l.id];
+      if (!code || seen.has(code)) return "";
+      seen.add(code);
+      const on = state.alertLines.includes(code);
+      return `
+      <label class="alert-line">
+        <input type="checkbox" ${on ? "checked" : ""} onchange="toggleAlertLine('${code}',this.checked)">
+        <span class="alert-line-swatch" style="background:${l.colour}"></span>
+        <span>${escapeHtml(l.name)}</span>
+      </label>`;
+    })
+    .join("");
+}
+
+function toggleAlertLine(code, on) {
+  const set = new Set(state.alertLines || []);
+  if (on) set.add(code);
+  else set.delete(code);
+  state.alertLines = [...set];
+  localStorage.setItem("bb_alertLines", JSON.stringify(state.alertLines));
+  syncPrefs();
+}
+
+// ── Telegram account linking ──
+// The bot has no Supabase session — a webhook only carries a chat id — so the
+// two are paired with a short-lived code the user types into the chat once.
+async function refreshTelegramStatus() {
+  const el = document.getElementById("tgStatus");
+  if (!el) return;
+  try {
+    const res = await authFetch("/api/telegram-link");
+    if (!res.ok) throw new Error();
+    const { linked, chats } = await res.json();
+    el.textContent = linked
+      ? `✅ Linked to ${chats} Telegram chat${chats === 1 ? "" : "s"}.`
+      : "Not linked. Get a code, then send it to the bot as /link CODE.";
+    document.getElementById("tgUnlinkBtn").style.display = linked ? "" : "none";
+  } catch {
+    el.textContent = "Couldn't check Telegram link status.";
+  }
+}
+
+async function requestTelegramCode() {
+  const el = document.getElementById("tgStatus");
+  try {
+    const res = await authFetch("/api/telegram-link", { method: "POST", body: "{}" });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.status);
+    const { code, expiresInMin } = await res.json();
+    el.innerHTML = `Send <code>/link ${escapeHtml(code)}</code> to the Bus Buddy bot within ${expiresInMin} minutes.`;
+  } catch (e) {
+    el.textContent = "Couldn't get a link code: " + e.message;
+  }
+}
+
+async function unlinkTelegram() {
+  try {
+    await authFetch("/api/telegram-link", { method: "DELETE" });
+    showToast("Telegram unlinked");
+  } catch {
+    showToast("Couldn't unlink Telegram");
+  }
+  refreshTelegramStatus();
 }
 
 async function refreshBusStopsCache() {
@@ -2826,22 +3584,18 @@ function clearAlertSound() {
 }
 
 async function saveSettings() {
-  state.apiKey = document.getElementById("apiKeyInput").value.trim();
   state.refreshSec =
     parseInt(document.getElementById("refreshInterval").value) || 30;
   state.reminderLeadMin =
     parseInt(document.getElementById("reminderLead").value) || 5;
 
-  localStorage.setItem("bb_apiKey", state.apiKey);
   localStorage.setItem("bb_refreshSec", state.refreshSec.toString());
   localStorage.setItem("bb_reminderLead", state.reminderLeadMin.toString());
 
-  if (state.apiKey) {
-    await setApiKey(state.apiKey);
-    document.getElementById("apiKeyBar").classList.add("hidden");
-    showToast("Settings saved");
-  }
+  syncPrefs();
+  startDashAutoRefresh();
   document.getElementById("settingsModal").classList.add("hidden");
+  showToast("Settings saved");
 }
 
 // ── Audio ──
@@ -2943,6 +3697,9 @@ async function sendNotification(title, body) {
 }
 
 // ── Web Push (background alerts) ──
+// The device id is no longer an identity — it just distinguishes this browser
+// from the other devices on the same account, so one account can hold several
+// push subscriptions.
 function getDeviceId() {
   let id = localStorage.getItem("bb_deviceId");
   if (!id) {
@@ -2987,7 +3744,7 @@ async function initPush() {
       });
     }
     pushSubscription = sub;
-    await syncPushReminders();
+    await registerPushDevice();
     setPushStatus("enabled");
   } catch (e) {
     console.error("Push init failed:", e);
@@ -2995,38 +3752,74 @@ async function initPush() {
   }
 }
 
-// Push the current departure reminders + subscription to the server so the
-// scheduled job can fire them when the app is closed. Also carries favourites
-// and places so they sync across the user's devices.
-async function syncPushReminders() {
+// Registers this browser as one of the account's push targets. Several devices
+// can be registered at once; the cron fans every alert out to all of them.
+async function registerPushDevice() {
+  if (!pushSubscription) return;
   try {
-    await fetch("/api/push", {
+    await authFetch("/api/push", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         deviceId: getDeviceId(),
         subscription: pushSubscription,
-        reminders: state.departureReminders,
-        favourites: state.favourites,
-        places: state.places,
       }),
     });
   } catch (e) {
-    console.error("Reminder sync failed:", e);
+    console.error("Push registration failed:", e);
   }
 }
 
-// Lighter sync for favourites/places changes that don't need a subscription.
-async function syncPrefs() {
+// Called on sign-out: this browser must stop receiving the outgoing account's
+// alerts, even though the push subscription itself survives in the browser.
+async function unregisterPushForDevice() {
+  await authFetch(
+    `/api/push?deviceId=${encodeURIComponent(getDeviceId())}`,
+    { method: "DELETE" }
+  );
+}
+
+// ── Server sync ──
+// Two stores, because they have different owners. The preference blob
+// (favourites, places, settings) is written only by the client, so a single
+// merged document is fine. Reminders live in their own table because the cron
+// writes to them too — keeping them out of the blob is what stops a "last
+// write wins" save from resurrecting a fired reminder's cooldown.
+function remindersToRows() {
+  return state.departureReminders.map((r) => {
+    const { id, ...payload } = r;
+    return { id, type: r.type || "scheduled", payload };
+  });
+}
+
+function rowsToReminders(rows) {
+  return (rows || []).map((row) => ({ ...row.payload, id: row.id, type: row.type }));
+}
+
+let prefsSyncTimer = null;
+
+// Coalesces the bursts of writes that a single user action can produce —
+// toggling a favourite calls this from three different render paths.
+function syncPrefs() {
+  clearTimeout(prefsSyncTimer);
+  prefsSyncTimer = setTimeout(pushPrefsNow, 400);
+}
+
+async function pushPrefsNow() {
   try {
-    await fetch("/api/push", {
+    await authFetch("/api/prefs", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        deviceId: getDeviceId(),
-        favourites: state.favourites,
-        places: state.places,
-        reminders: state.departureReminders,
+        data: {
+          favourites: state.favourites,
+          alertLines: state.alertLines,
+          recentSearches: state.recentSearches,
+          places: state.places,
+          dropoffAlerts: state.dropoffAlerts,
+          settings: {
+            refreshSec: state.refreshSec,
+            reminderLeadMin: state.reminderLeadMin,
+          },
+        },
       }),
     });
   } catch (e) {
@@ -3034,53 +3827,78 @@ async function syncPrefs() {
   }
 }
 
-// On startup, pull any server-stored prefs for this device and merge them in.
-// Cross-device sync: a device that has never set favourites locally adopts the
-// server copy; otherwise local wins (the user's most recent edits are source).
+async function syncPushReminders() {
+  try {
+    await authFetch("/api/reminders", {
+      method: "POST",
+      body: JSON.stringify({ reminders: remindersToRows() }),
+    });
+  } catch (e) {
+    console.error("Reminder sync failed:", e);
+  }
+}
+
+// On startup, pull this *account's* stored state. Unlike the old
+// device-keyed version, this genuinely restores across devices: sign in on a
+// new phone and your favourites, places and reminders are already there.
+//
+// The server is authoritative on load. Local storage is a cache for offline
+// starts, not a second source of truth — treating it as one is what produced
+// the old "whichever device edited last silently wins" behaviour.
 async function restorePrefs() {
   try {
-    const remote = await fetch(
-      `/api/push?deviceId=${encodeURIComponent(getDeviceId())}`
-    ).then((r) => r.json());
-    if (!remote || typeof remote !== "object") return;
+    const [prefsRes, remRes] = await Promise.all([
+      authFetch("/api/prefs"),
+      authFetch("/api/reminders"),
+    ]);
+    if (!prefsRes.ok || !remRes.ok) return;
 
-    let changed = false;
-    if (
-      state.favourites.length === 0 &&
-      Array.isArray(remote.favourites) &&
-      remote.favourites.length
-    ) {
-      state.favourites = remote.favourites;
-      localStorage.setItem("bb_favourites", JSON.stringify(state.favourites));
-      changed = true;
+    const { data } = await prefsRes.json();
+    const { reminders } = await remRes.json();
+
+    if (data && typeof data === "object") {
+      if (Array.isArray(data.favourites)) {
+        state.favourites = data.favourites;
+        localStorage.setItem(FAV_KEY, JSON.stringify(state.favourites));
+      }
+      if (Array.isArray(data.alertLines)) {
+        state.alertLines = data.alertLines;
+        localStorage.setItem("bb_alertLines", JSON.stringify(state.alertLines));
+      }
+      if (Array.isArray(data.recentSearches)) {
+        state.recentSearches = data.recentSearches.slice(0, RECENT_MAX);
+        localStorage.setItem(RECENT_KEY, JSON.stringify(state.recentSearches));
+      }
+      if (data.places && typeof data.places === "object") {
+        state.places = sanitizePlaces(data.places);
+        localStorage.setItem("bb_places", JSON.stringify(state.places));
+      }
+      if (Array.isArray(data.dropoffAlerts)) {
+        state.dropoffAlerts = data.dropoffAlerts;
+        localStorage.setItem("bb_dropoffAlerts", JSON.stringify(state.dropoffAlerts));
+      }
+      if (data.settings) {
+        if (data.settings.refreshSec) state.refreshSec = data.settings.refreshSec;
+        if (data.settings.reminderLeadMin)
+          state.reminderLeadMin = data.settings.reminderLeadMin;
+        localStorage.setItem("bb_refreshSec", String(state.refreshSec));
+        localStorage.setItem("bb_reminderLead", String(state.reminderLeadMin));
+      }
     }
-    if (
-      Object.keys(state.places).length === 0 &&
-      remote.places &&
-      Object.keys(remote.places).length
-    ) {
-      state.places = sanitizePlaces(remote.places);
-      localStorage.setItem("bb_places", JSON.stringify(state.places));
-      changed = true;
-    }
-    if (
-      state.departureReminders.length === 0 &&
-      Array.isArray(remote.reminders) &&
-      remote.reminders.length
-    ) {
-      state.departureReminders = remote.reminders;
+
+    if (Array.isArray(reminders)) {
+      state.departureReminders = rowsToReminders(reminders);
       localStorage.setItem(
         "bb_deptReminders",
         JSON.stringify(state.departureReminders)
       );
-      changed = true;
     }
-    if (changed) {
-      renderFavourites();
-      renderDepartureReminders();
-      renderPlaces();
-      refreshDashboard();
-    }
+
+    renderFavourites();
+    renderDepartureReminders();
+    renderDropoffAlerts();
+    renderPlaces();
+    refreshDashboard();
   } catch (e) {
     console.error("Prefs restore failed:", e);
   }
@@ -3107,14 +3925,13 @@ async function testBackgroundAlert() {
   if (!pushSubscription) await initPush();
   showToast("Sending background alert… lock your phone to see it arrive.");
   try {
-    const res = await fetch("/api/test-push", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceId: getDeviceId() }),
-    });
+    const res = await authFetch("/api/test-push", { method: "POST", body: "{}" });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       showToast("Background test failed: " + (err.error || res.status));
+    } else {
+      const out = await res.json().catch(() => ({}));
+      if (out.devices > 1) showToast(`Sent to ${out.sent} of ${out.devices} devices on this account.`);
     }
   } catch (e) {
     showToast("Background test failed: " + e.message);
@@ -3211,8 +4028,27 @@ async function getStopName(code) {
   }
 }
 
+// This escaped only ' and " — not <, > or & — so it was never HTML-safe; it
+// was really a "make this survive being pasted into an onclick attribute"
+// helper wearing the wrong name. Both jobs are needed, so they're now two
+// functions that each do one of them properly.
 function escapeHtml(str) {
-  return str.replace(/'/g, "\\'").replace(/"/g, "&quot;");
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// For text going into a JS string literal that itself sits inside an HTML
+// attribute — onclick="fn('…')". Two layers of parsing, so two layers of
+// escaping: JS first (a bare quote would end the literal), then HTML. Escaping
+// only one of them is exactly how a stop name with an apostrophe breaks out.
+function jsArg(str) {
+  return escapeHtml(
+    String(str ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'")
+  );
 }
 
 function closeModal(event, id) {

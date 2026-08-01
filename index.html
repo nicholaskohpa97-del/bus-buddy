@@ -316,6 +316,17 @@
       justify-content: center;
       transition: background 0.3s, color 0.3s;
     }
+    /* Live chips are <button>s (tap to track that bus); the inactive ones and
+       the map-popup copies are still <span>s. Reset the UA button styling so
+       both render identically. */
+    button.arrival-badge {
+      font-family: inherit;
+      border: none;
+      cursor: pointer;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    button.arrival-badge:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .arrival-badge.arriving { background: rgba(16,185,129,0.1); color: var(--green); }
     .arrival-badge.soon { background: rgba(245,158,11,0.1); color: var(--yellow); }
     .arrival-badge.later { background: rgba(13,148,136,0.08); color: var(--accent); }
@@ -423,6 +434,155 @@
     .fav-item:hover { border-color: rgba(13,148,136,0.3); }
     .fav-name { font-weight: 700; font-size: 15px; }
     .fav-detail { font-size: 13px; color: var(--text2); margin-top: 2px; }
+    .fav-service {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: rgba(13,148,136,0.12);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      vertical-align: middle;
+    }
+    .dash-stop-services { font-size: 12px; color: var(--accent); font-weight: 600; }
+
+    /* ── Journey planner ── */
+    .modal-tall { max-height: 86vh; overflow-y: auto; }
+    .mode-repeat-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      font-weight: 600;
+    }
+    .mode-repeat-toggle input { width: auto; margin: 0; }
+    .planner-summary {
+      font-size: 13px;
+      color: var(--text2);
+      margin: 14px 0 6px;
+      line-height: 1.5;
+    }
+    .itinerary-card {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 12px;
+      margin-top: 10px;
+      font: inherit;
+      color: var(--text);
+      cursor: pointer;
+    }
+    .itinerary-card:hover { border-color: rgba(13,148,136,0.4); }
+    .itinerary-top {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .itinerary-duration { font-size: 17px; font-weight: 700; }
+    .itinerary-fare { font-size: 13px; color: var(--accent); font-weight: 600; }
+    .itinerary-legs {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 4px;
+      margin: 8px 0 6px;
+    }
+    .leg-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .leg-bus { border-color: rgba(13,148,136,0.4); color: var(--accent); }
+    .leg-subway, .leg-rail { border-color: rgba(99,102,241,0.4); color: #6366f1; }
+    .leg-arrow { color: var(--text2); font-size: 12px; }
+    .itinerary-meta { font-size: 12px; color: var(--text2); }
+    .leg-row {
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+      margin-top: 12px;
+    }
+    .leg-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .leg-name { font-size: 13px; color: var(--text2); }
+    .leg-row-note { font-size: 12px; color: var(--text2); margin-top: 4px; }
+    .planner-eta {
+      margin-top: 14px;
+      padding: 10px 12px;
+      border-radius: var(--radius-sm);
+      background: rgba(13,148,136,0.08);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .planner-credit { font-size: 11px; color: var(--text2); margin-top: 14px; }
+    .oneshot-eta { color: var(--text2); font-size: 13px; }
+
+    /* ── Rail ── */
+    .map-rail-btn { top: 130px; font-size: 18px; line-height: 1; }
+    .map-rail-btn.active { background: var(--accent); color: #fff; }
+    .alert-lines { display: flex; flex-direction: column; gap: 6px; }
+    .alert-line {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .alert-line input { width: auto; margin: 0; }
+    .alert-line-swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 4px;
+      flex: 0 0 auto;
+    }
+
+    /* ── Recent searches ── */
+    .recent-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px 4px;
+    }
+    .recent-header h4 {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text2);
+      margin: 0;
+    }
+    .recent-clear {
+      border: 0;
+      background: none;
+      color: var(--accent);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      padding: 2px 4px;
+    }
+    .recent-item { display: flex; align-items: center; gap: 10px; }
+    .recent-item .search-result-item { flex: 1; min-width: 0; }
+    .recent-icon { flex: 0 0 auto; padding-left: 12px; font-size: 14px; }
+    .recent-remove {
+      flex: 0 0 auto;
+      border: 0;
+      background: none;
+      color: var(--text2);
+      font-size: 13px;
+      cursor: pointer;
+      padding: 8px 12px;
+    }
     .fav-icon {
       width: 40px;
       height: 40px;
@@ -591,23 +751,34 @@
       margin: 0 -4px;
       padding: 0 4px;
     }
+    /* The row is a container now, not a button: it holds the tap-to-open
+       target and a separate star, and a button can't nest inside a button. */
     .route-stop-item {
       display: flex;
       align-items: center;
-      gap: 12px;
       width: 100%;
-      text-align: left;
-      background: none;
-      border: none;
       padding: 2px 8px;
-      cursor: pointer;
       color: var(--text);
-      font-family: inherit;
       border-radius: 10px;
       position: relative;
     }
+    .route-stop-main {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex: 1;
+      min-width: 0;
+      text-align: left;
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      color: inherit;
+      font-family: inherit;
+    }
     .route-stop-item:hover,
-    .route-stop-item:focus-visible { background: var(--surface2); outline: none; }
+    .route-stop-main:focus-visible { background: var(--surface2); outline: none; }
+    .route-stop-fav { flex: 0 0 auto; margin-left: 6px; }
     /* timeline rail */
     .route-stop-rail {
       position: relative;
@@ -916,20 +1087,107 @@
 
     .hidden { display: none !important; }
 
-    /* ── API Key Bar ── */
-    .api-key-bar {
-      background: rgba(245,158,11,0.08);
-      border: 1px solid rgba(245,158,11,0.2);
+    /* ── Auth gate ── */
+    /* Covers the whole viewport rather than hiding <main>: the app behind it
+       is never rendered signed-out, so there is nothing to peek at. */
+    .auth-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 4000;
+      background: var(--bg);
+      overflow-y: auto;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 16px;
+    }
+    body.auth-gate > header,
+    body.auth-gate > main,
+    body.auth-gate > nav { visibility: hidden; }
+    .auth-card {
+      width: 100%;
+      max-width: 380px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px 24px 22px;
+      box-shadow: var(--shadow, 0 8px 30px rgba(0,0,0,0.08));
+    }
+    .auth-logo { font-size: 40px; text-align: center; line-height: 1; }
+    .auth-title { text-align: center; margin: 10px 0 4px; font-size: 22px; }
+    .auth-sub {
+      text-align: center;
+      font-size: 13px;
+      color: var(--text2);
+      margin: 0 0 18px;
+      line-height: 1.5;
+    }
+    .auth-tabs {
+      display: flex;
+      gap: 4px;
+      background: var(--bg2, rgba(0,0,0,0.04));
       border-radius: var(--radius-sm);
-      padding: 14px 16px;
+      padding: 4px;
       margin-bottom: 16px;
+    }
+    .auth-tab {
+      flex: 1;
+      border: 0;
+      background: transparent;
+      padding: 8px 10px;
+      border-radius: calc(var(--radius-sm) - 2px);
+      font: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text2);
+      cursor: pointer;
+    }
+    .auth-tab.active { background: var(--card); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    #authForm label { display: block; margin-top: 10px; }
+    .auth-submit { width: 100%; margin-top: 16px; justify-content: center; }
+    .auth-hint { font-size: 12px; color: var(--text2); margin-top: 6px; }
+    .auth-error { font-size: 13px; color: var(--red, #dc2626); margin-top: 10px; }
+    .auth-note { font-size: 13px; color: var(--accent); margin-top: 10px; }
+    .auth-link {
+      display: block;
+      width: 100%;
+      margin-top: 10px;
+      border: 0;
+      background: none;
+      color: var(--accent);
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .auth-divider {
       display: flex;
       align-items: center;
       gap: 10px;
-      font-size: 13px;
-      color: #92400e;
+      margin: 18px 0 12px;
+      color: var(--text2);
+      font-size: 12px;
     }
-    .api-key-bar a { color: var(--accent); text-decoration: underline; }
+    .auth-divider::before,
+    .auth-divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+    .auth-google {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .auth-legal {
+      font-size: 11px;
+      color: var(--text2);
+      text-align: center;
+      margin: 18px 0 0;
+      line-height: 1.5;
+    }
 
     @media (max-width: 380px) {
       .tab { font-size: 10px; }
@@ -1245,7 +1503,9 @@
     }
   </style>
 </head>
-<body>
+<!-- Starts gated: the app is hidden until auth.js confirms a session, so no
+     render path ever runs without a signed-in user. -->
+<body class="auth-gate">
   <div id="splashScreen" class="splash-screen" aria-hidden="true">
     <div class="splash-rail"></div>
     <svg class="splash-bus" width="140" height="91" viewBox="0 0 200 130" xmlns="http://www.w3.org/2000/svg">
@@ -1300,6 +1560,41 @@
       setTimeout(hide, FALLBACK_MS);
     })();
   </script>
+  <!-- AUTH GATE — sits above everything until there's a session. -->
+  <div id="authScreen" class="auth-screen hidden">
+    <div class="auth-card">
+      <div class="auth-logo" aria-hidden="true">🚌</div>
+      <h1 class="auth-title">Bus Buddy</h1>
+      <p class="auth-sub">Sign in to sync your stops, reminders and journeys across every device.</p>
+
+      <div class="auth-tabs" role="tablist">
+        <button id="authTabSignin" class="auth-tab active" role="tab" onclick="authSetMode('signin')">Sign in</button>
+        <button id="authTabSignup" class="auth-tab" role="tab" onclick="authSetMode('signup')">Sign up</button>
+      </div>
+
+      <form id="authForm" onsubmit="authSubmit(event)">
+        <label for="authEmail">Email</label>
+        <input type="email" id="authEmail" autocomplete="email" placeholder="you@example.com" required>
+        <label for="authPassword">Password</label>
+        <input type="password" id="authPassword" autocomplete="current-password" placeholder="Your password" required>
+        <p id="authPasswordHint" class="auth-hint hidden">At least 8 characters, with a letter and a number.</p>
+        <p id="authError" class="auth-error hidden" role="alert"></p>
+        <p id="authNote" class="auth-note hidden" role="status"></p>
+        <button type="submit" id="authSubmit" class="btn auth-submit">Sign in</button>
+        <button type="button" id="authForgot" class="auth-link" onclick="authForgotPassword()">Forgot password?</button>
+
+        <div class="auth-divider"><span>or</span></div>
+
+        <button type="button" class="btn btn-ghost auth-google" onclick="authGoogle()">
+          <svg width="16" height="16" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.9 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.0 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.2-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.0 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.3 0-9.7-3.1-11.3-7.9l-6.5 5C9.6 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4.1 5.6l6.2 5.2C39.9 35.9 44 30.5 44 24c0-1.2-.1-2.4-.4-3.5z"/></svg>
+          Continue with Google
+        </button>
+      </form>
+
+      <p class="auth-legal">Bus timings come from LTA DataMall. Bus Buddy stores only what you save in the app.</p>
+    </div>
+  </div>
+
   <header>
     <div>
       <h1>Bus Buddy</h1>
@@ -1324,12 +1619,6 @@
         <button class="icon-btn" onclick="dismissInstall()" aria-label="Dismiss" style="width:28px;height:28px;font-size:12px;">&#10005;</button>
       </div>
     </div>
-    <div id="apiKeyBar" class="api-key-bar">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-      <span>Set your LTA DataMall API key to get started.</span>
-      <button class="btn btn-sm" onclick="openSettings()">Set Key</button>
-    </div>
-
     <!-- HOME / DASHBOARD TAB -->
     <div id="tab-dashboard">
       <div class="search-bar">
@@ -1364,6 +1653,27 @@
           <button class="btn btn-ghost btn-sm" onclick="refreshDashNearby(true)" data-i18n="common.refresh">Refresh</button>
         </div>
         <div id="dashNearby"></div>
+      </div>
+      <div class="dash-section">
+        <div class="dash-section-header">
+          <h3>Journey Modes</h3>
+          <div style="display:flex;gap:6px;">
+            <button class="btn btn-ghost btn-sm" onclick="openMrtPlanner()">&#128645; Train</button>
+            <button class="btn btn-ghost btn-sm" onclick="openPlanner()">Plan a trip</button>
+          </div>
+        </div>
+        <div id="dashModes"></div>
+        <div id="dashModesEmpty" class="empty-state hidden">
+          <div class="icon">&#129517;</div>
+          <p>No journey modes yet.<br><a href="#" onclick="openPlanner();return false" style="color:var(--accent)">Plan a trip</a> or <a href="#" onclick="switchTab('reminders');return false" style="color:var(--accent)">save a mode</a>.</p>
+        </div>
+      </div>
+      <div class="dash-section hidden" id="dashRidesSection">
+        <div class="dash-section-header">
+          <h3>In Progress</h3>
+          <button class="btn btn-ghost btn-sm" onclick="switchTab('reminders')" data-i18n="common.manage">Manage</button>
+        </div>
+        <div id="dashRides"></div>
       </div>
       <div class="dash-section">
         <div class="dash-section-header">
@@ -1423,6 +1733,7 @@
         <button class="map-locate-btn" onclick="locateOnMap()" title="Find my location">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
         </button>
+        <button class="map-locate-btn map-rail-btn" id="mrtToggle" onclick="toggleMrtLayer()" title="Show rail network" aria-pressed="false" aria-label="Toggle rail network">&#128645;</button>
       </div>
     </div>
 
@@ -1441,10 +1752,21 @@
         <h3 data-i18n="reminders.journeyModes">Journey Modes</h3>
         <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">One tap to arm your departure reminder and drop-off alert together.</p>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-          <button class="btn" onclick="openModeModal()" data-i18n="reminders.addMode">+ Add Journey Mode</button>
+          <button class="btn" onclick="openPlanner()">&#129517; Plan a trip</button>
+          <button class="btn btn-ghost" onclick="openModeModal()" data-i18n="reminders.addMode">+ Add Journey Mode</button>
           <button class="btn btn-ghost btn-sm" onclick="sendNotification('Test Alert','Audio and notifications are working!')" data-i18n="reminders.testAlert">&#128276; Test Alert</button>
         </div>
         <div id="modesContainer" style="margin-top:12px;"></div>
+      </div>
+      <div class="card" style="margin-top:12px;">
+        <h3>Rides In Progress</h3>
+        <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">Bus Buddy follows the <em>bus</em>, not your phone &mdash; using the vehicle position LTA publishes. The alert arrives one stop early with the app closed and the screen locked.</p>
+        <div id="rideList"></div>
+      </div>
+      <div class="card" style="margin-top:12px;">
+        <h3>Tracking Now</h3>
+        <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">One-shot reminders for a specific bus. Tap any arrival time in the Search tab to start one &mdash; it alerts you as that bus approaches, then deletes itself.</p>
+        <div id="oneShotReminders"></div>
       </div>
       <div class="card" style="margin-top:12px;">
         <h3>Departure Reminders</h3>
@@ -1454,7 +1776,7 @@
       </div>
       <div class="card" style="margin-top:12px;">
         <h3>Drop-off Alerts</h3>
-        <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">Get alerted when you're approaching your destination stop. This uses live GPS, so keep the app open during your ride &mdash; tracking stays awake while it's running.</p>
+        <p style="font-size:13px;color:var(--text2);margin:8px 0 14px;">A destination-only alert, with no bus attached. It geofences your phone's GPS, so the app has to stay open. For an alert that works with the app closed, start a ride from a bus route instead &mdash; that one tracks the vehicle.</p>
         <button class="btn" onclick="openDropoffModal()" data-i18n="reminders.addDropoff">+ Add Drop-off Alert</button>
         <div id="dropoffReminders" style="margin-top:12px;"></div>
       </div>
@@ -1508,12 +1830,21 @@
         <option value="ms">Bahasa Melayu</option>
         <option value="ta">தமிழ்</option>
       </select>
-      <label for="apiKeyInput" data-i18n="settings.apiKey">LTA DataMall API Key</label>
-      <input type="text" id="apiKeyInput" placeholder="Enter your API key">
-      <p style="font-size:12px;color:var(--text2);margin-top:6px;">
-        Free key from <span style="color:var(--accent)">datamall.lta.gov.sg</span> &rarr; Request for API Access
-      </p>
-      <label for="refreshInterval" data-i18n="settings.refresh">Auto-refresh interval (seconds)</label>
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">
+        <label>Account</label>
+        <div id="accountEmail" style="font-size:13px;color:var(--text2);margin-top:4px;word-break:break-all;"></div>
+        <button class="btn btn-ghost btn-sm" onclick="authSignOut()" style="margin-top:8px;">Sign out</button>
+      </div>
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">
+        <label>Telegram</label>
+        <p style="font-size:12px;color:var(--text2);margin:4px 0 6px;">Create and list journey modes from a Telegram chat.</p>
+        <div id="tgStatus" style="font-size:13px;color:var(--text2);"></div>
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
+          <button class="btn btn-ghost btn-sm" onclick="requestTelegramCode()">Get link code</button>
+          <button id="tgUnlinkBtn" class="btn btn-ghost btn-sm" onclick="unlinkTelegram()" style="display:none;">Unlink</button>
+        </div>
+      </div>
+      <label for="refreshInterval" data-i18n="settings.refresh" style="margin-top:14px;">Auto-refresh interval (seconds)</label>
       <input type="number" id="refreshInterval" value="30" min="10" max="120">
       <label for="reminderLead" data-i18n="settings.lead">Departure reminder lead time (minutes)</label>
       <input type="number" id="reminderLead" value="5" min="1" max="30">
@@ -1535,9 +1866,18 @@
         </p>
       </div>
       <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">
+        <label>Rail disruption alerts</label>
+        <p style="font-size:12px;color:var(--text2);margin:4px 0 8px;">Pushed when LTA reports a disruption on a line you follow, and again when service is restored. Defaults to the lines near your favourite stops.</p>
+        <div id="alertLinesList" class="alert-lines"></div>
+        <p style="font-size:12px;color:var(--text2);margin-top:10px;">
+          <strong>Bus disruptions aren't covered.</strong> LTA publishes no bus-disruption feed &mdash; there is no official source to alert from. The operators announce them on social media only, which isn't something Bus Buddy can rely on, so it doesn't pretend to.
+        </p>
+      </div>
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">
         <label>Bus Stop Database</label>
         <div style="font-size:13px;color:var(--text2);margin-top:4px;" id="busStopCacheInfo">Checking cache...</div>
         <button class="btn btn-ghost btn-sm" onclick="refreshBusStopsCache()" style="margin-top:8px;">&#8635; Refresh bus stop database</button>
+        <div id="ltaKeyStatus" style="font-size:12px;color:var(--text2);margin-top:10px;"></div>
       </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="document.getElementById('settingsModal').classList.add('hidden')" data-i18n="settings.cancel">Cancel</button>
@@ -1581,18 +1921,94 @@
       <input type="text" id="modeDeptStop" placeholder="Search stop name or code" data-stop-autocomplete autocomplete="off">
       <label for="modeDeptService">Bus Service Number</label>
       <input type="text" id="modeDeptService" placeholder="e.g. 14">
-      <label for="modeLeaveTime">Leave by</label>
-      <input type="time" id="modeLeaveTime" value="08:00">
-      <label for="modeLeadMin">Alert when bus is within (minutes)</label>
-      <input type="number" id="modeLeadMin" value="5" min="1" max="30">
       <p class="modal-section-divider">Drop-off</p>
       <label for="modeDropoffStop">Destination Stop Code</label>
       <input type="text" id="modeDropoffStop" placeholder="Search stop name or code" data-stop-autocomplete autocomplete="off">
-      <label for="modeDropoffRadius">Alert radius (meters)</label>
-      <input type="number" id="modeDropoffRadius" value="300" min="100" max="1000" step="50">
+      <p style="font-size:12px;color:var(--text2);margin-top:6px;">You'll be alerted at the stop <em>before</em> this one, tracked on the server &mdash; so it still arrives with the app closed.</p>
+      <p class="modal-section-divider">Schedule</p>
+      <label class="mode-repeat-toggle">
+        <input type="checkbox" id="modeRepeatOn" onchange="toggleModeRepeat()">
+        <span>Repeat on a schedule</span>
+      </label>
+      <p style="font-size:12px;color:var(--text2);margin-top:4px;">Leave this off for a mode you start by hand when you're actually travelling.</p>
+      <div id="modeRepeatFields" class="hidden">
+        <label for="modeRepeatTime">Leave by</label>
+        <input type="time" id="modeRepeatTime" value="08:00">
+        <label id="modeRepeatDaysLabel">Repeat on</label>
+        <div id="modeRepeatDays" class="day-picker" role="group" aria-labelledby="modeRepeatDaysLabel"></div>
+        <p style="font-size:11px;color:var(--text2);margin-top:4px;">Leave none selected to alert every day.</p>
+      </div>
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="document.getElementById('modeModal').classList.add('hidden')">Cancel</button>
         <button class="btn" onclick="saveMode()">Save Mode</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- JOURNEY PLANNER -->
+  <div id="plannerModal" class="modal-overlay hidden" onclick="closeModal(event, 'plannerModal')" role="dialog" aria-modal="true" aria-labelledby="plannerTitle">
+    <div class="modal modal-tall" onclick="event.stopPropagation()">
+      <h3 id="plannerTitle">Plan a trip</h3>
+
+      <div id="plannerResultsView">
+        <label for="plannerFrom">From</label>
+        <input type="text" id="plannerFrom" placeholder="Address or postal code" data-address-autocomplete autocomplete="off">
+        <label for="plannerTo">To</label>
+        <input type="text" id="plannerTo" placeholder="Address or postal code" data-address-autocomplete autocomplete="off">
+        <div class="modal-actions" style="margin-top:14px;">
+          <button class="btn btn-ghost" onclick="closePlanner()">Close</button>
+          <button class="btn" onclick="planJourney()">Find routes</button>
+        </div>
+        <div id="plannerSummary" class="planner-summary hidden">
+          <span id="plannerFromLabel"></span> &rarr; <span id="plannerToLabel"></span>
+        </div>
+        <div id="plannerResults"></div>
+        <p class="planner-credit">Routes and fares from <strong>OneMap</strong>, Singapore Land Authority.</p>
+      </div>
+
+      <div id="plannerConfirmView" class="hidden">
+        <div class="route-stops-head">
+          <button class="btn btn-ghost btn-sm" onclick="backToItineraries()" aria-label="Back to routes">&#8592; Routes</button>
+        </div>
+        <div id="plannerConfirmBody"></div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" onclick="closePlanner()">Close</button>
+          <button class="btn" onclick="startPlannedJourney()">Start journey</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MRT STATION PLANNER -->
+  <div id="mrtModal" class="modal-overlay hidden" onclick="closeModal(event, 'mrtModal')" role="dialog" aria-modal="true" aria-labelledby="mrtTitle">
+    <div class="modal modal-tall" onclick="event.stopPropagation()">
+      <h3 id="mrtTitle">&#128645; Train route &amp; fare</h3>
+      <datalist id="mrtStationList"></datalist>
+      <label for="mrtFrom">From station</label>
+      <input type="text" id="mrtFrom" list="mrtStationList" placeholder="e.g. Sengkang" autocomplete="off">
+      <label for="mrtTo">To station</label>
+      <input type="text" id="mrtTo" list="mrtStationList" placeholder="e.g. Jurong East" autocomplete="off">
+      <div class="modal-actions" style="margin-top:14px;">
+        <button class="btn btn-ghost" onclick="closeMrtPlanner()">Close</button>
+        <button class="btn" onclick="planMrtJourney()">Find route</button>
+      </div>
+      <div id="mrtResults"></div>
+      <p class="planner-credit">Routes and fares from <strong>OneMap</strong>, Singapore Land Authority. Fares shown are adult card fares.</p>
+    </div>
+  </div>
+
+  <!-- ONE-SHOT REMINDER CONFIRM -->
+  <div id="oneShotModal" class="modal-overlay hidden" onclick="closeModal(event, 'oneShotModal')" role="dialog" aria-modal="true" aria-labelledby="oneShotTitle">
+    <div class="modal" onclick="event.stopPropagation()">
+      <h3 id="oneShotTitle">Track this bus?</h3>
+      <p id="oneShotSummary" style="font-size:14px;line-height:1.6;margin:10px 0 4px;"></p>
+      <p style="font-size:12px;color:var(--text2);margin-top:10px;">
+        You'll get a push as it gets close, roughly every 3 minutes, even with the app closed.
+        It stops on its own when the bus arrives &mdash; or tap Dismiss on any alert.
+      </p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="cancelOneShot()">Cancel</button>
+        <button class="btn" onclick="confirmOneShot()">Track it</button>
       </div>
     </div>
   </div>
@@ -1726,8 +2142,17 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <!-- Supabase's UMD build, loaded from a CDN the same way Leaflet is.
+       Hand-rolling the OAuth redirect dance and silent token refresh is a lot
+       of subtle code to get wrong for no benefit. -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <script src="i18n.js"></script>
   <script src="app.js"></script>
+  <!-- auth.js last: it owns DOMContentLoaded and calls into app.js once a
+       session exists, so app.js must already be parsed. -->
+  <script src="journey.js"></script>
+  <script src="mrt.js"></script>
+  <script src="auth.js"></script>
   <script>
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js");

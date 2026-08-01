@@ -23,12 +23,10 @@ async function handleAPI(req, res, pathname) {
     return json(res, { hasKey: !!LTA_API_KEY });
   }
 
-  if (pathname === "/api/set-key" && req.method === "POST") {
-    const body = await readBody(req);
-    LTA_API_KEY = body.key || "";
-    return json(res, { ok: true });
-  }
-
+  // Account-backed endpoints (config, prefs, reminders, push, modes) need a
+  // real Supabase project, so they are deliberately not stubbed here — a fake
+  // session would let bugs in the auth gating pass unnoticed locally. Run
+  // those against a preview deployment instead.
   if (pathname === "/api/bus-arrival") {
     if (!LTA_API_KEY) return json(res, { error: "API key not set" }, 400);
     const stop = url.searchParams.get("BusStopCode");
@@ -78,7 +76,57 @@ async function handleAPI(req, res, pathname) {
     }
   }
 
+  // Journey planning, mirroring api/route-plan.js minus the auth check —
+  // there's no Supabase session locally. Needs ONEMAP_EMAIL / ONEMAP_PASSWORD
+  // in the environment; the token is re-minted per run rather than cached,
+  // which is fine for a dev server and avoids needing the kv table.
+  if (pathname === "/api/route-plan") {
+    const start = url.searchParams.get("start") || "";
+    const end = url.searchParams.get("end") || "";
+    if (!start || !end) return json(res, { error: "start and end required" }, 400);
+    if (!process.env.ONEMAP_EMAIL || !process.env.ONEMAP_PASSWORD) {
+      return json(res, { error: "ONEMAP_EMAIL / ONEMAP_PASSWORD not set" }, 400);
+    }
+    try {
+      const token = await getLocalOneMapToken();
+      const sgt = new Date(Date.now() + 8 * 3600 * 1000);
+      const routeUrl = new URL("https://www.onemap.gov.sg/api/public/routingsvc/route");
+      routeUrl.searchParams.set("start", start);
+      routeUrl.searchParams.set("end", end);
+      routeUrl.searchParams.set("routeType", "pt");
+      routeUrl.searchParams.set("date", sgt.toISOString().slice(0, 10));
+      routeUrl.searchParams.set("time", sgt.toISOString().slice(11, 19));
+      routeUrl.searchParams.set("mode", "TRANSIT");
+      routeUrl.searchParams.set("maxWalkDistance", "1000");
+      routeUrl.searchParams.set("numItineraries", "3");
+      const r = await fetch(routeUrl.toString(), {
+        headers: { Authorization: token, accept: "application/json" },
+      });
+      return json(res, await r.json(), r.ok ? 200 : 502);
+    } catch (err) {
+      return json(res, { error: "Failed to plan route", details: err.message }, 502);
+    }
+  }
+
   json(res, { error: "Not found" }, 404);
+}
+
+let localOneMapToken = null;
+async function getLocalOneMapToken() {
+  if (localOneMapToken) return localOneMapToken;
+  const r = await fetch("https://www.onemap.gov.sg/api/auth/post/getToken", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: process.env.ONEMAP_EMAIL,
+      password: process.env.ONEMAP_PASSWORD,
+    }),
+  });
+  if (!r.ok) throw new Error(`OneMap auth ${r.status}`);
+  const data = await r.json();
+  if (!data.access_token) throw new Error("OneMap auth returned no access_token");
+  localOneMapToken = data.access_token;
+  return localOneMapToken;
 }
 
 async function fetchPaginated(res, endpoint) {
